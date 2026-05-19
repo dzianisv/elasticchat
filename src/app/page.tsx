@@ -1,65 +1,98 @@
-import Image from "next/image";
+'use client'
+
+import { useChat } from '@ai-sdk/react'
+import { UIMessage } from 'ai'
+import { useRef, useEffect, useState, FormEvent } from 'react'
+
+function getMessageText(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+    .map((p) => p.text)
+    .join('')
+}
 
 export default function Home() {
+  const { messages, sendMessage, status } = useChat()
+  const [input, setInput] = useState('')
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const isLoading = status === 'streaming' || status === 'submitted'
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight)
+  }, [messages])
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!input.trim() || isLoading) return
+    sendMessage({ text: input })
+    setInput('')
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div className="flex flex-col h-screen bg-gray-950">
+      <header className="border-b border-gray-800 px-6 py-4 flex items-center gap-3">
+        <div className="w-8 h-8 rounded bg-[#76b900] flex items-center justify-center">
+          <span className="text-black font-bold text-sm">N</span>
+        </div>
+        <h1 className="text-lg font-semibold text-white">
+          NVIDIA Blog Assistant
+        </h1>
+      </header>
+
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
+        {messages.length === 0 && (
+          <div className="text-center text-gray-500 mt-20">
+            <p className="text-xl font-medium text-gray-300">
+              Ask me about NVIDIA
+            </p>
+            <p className="mt-2 text-sm">
+              I can search blog posts about GPUs, AI, CUDA, and more.
+            </p>
+          </div>
+        )}
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
+          >
+            <div
+              className={`max-w-[75%] rounded-lg px-4 py-3 text-sm whitespace-pre-wrap ${
+                m.role === 'user'
+                  ? 'bg-[#76b900] text-black'
+                  : 'bg-gray-800 text-gray-100'
+              }`}
+            >
+              {getMessageText(m)}
+            </div>
+          </div>
+        ))}
+        {isLoading && (
+          <div className="flex justify-start">
+            <div className="bg-gray-800 text-gray-400 rounded-lg px-4 py-3 text-sm">
+              Thinking...
+            </div>
+          </div>
+        )}
+      </div>
+
+      <form
+        onSubmit={handleSubmit}
+        className="border-t border-gray-800 px-6 py-4 flex gap-3"
+      >
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Ask about NVIDIA blog posts..."
+          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#76b900]"
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+        <button
+          type="submit"
+          disabled={isLoading || !input.trim()}
+          className="bg-[#76b900] text-black font-medium px-5 py-3 rounded-lg text-sm hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          Send
+        </button>
+      </form>
     </div>
-  );
+  )
 }
