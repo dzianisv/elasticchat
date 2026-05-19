@@ -1,7 +1,6 @@
 // @ts-nocheck
-import { streamText, tool } from 'ai'
+import { streamText, tool, jsonSchema, stepCountIs } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
-import { z } from 'zod'
 import { es } from '@/lib/elasticsearch'
 import { embedTexts } from '@/lib/embeddings'
 
@@ -16,26 +15,39 @@ const SYSTEM_PROMPT = `You are an NVIDIA blog assistant. Search for relevant blo
 
 const INDEX = 'nvidia-blogs'
 
+const searchSchema = jsonSchema({
+  type: 'object',
+  properties: {
+    query: { type: 'string', description: 'Search query' },
+    sort_by: { type: 'string', enum: ['relevance', 'date_desc'], description: 'Sort order. Default relevance.' },
+  },
+  required: ['query', 'sort_by'],
+  additionalProperties: false,
+})
+
+const getFullPostSchema = jsonSchema({
+  type: 'object',
+  properties: {
+    url: { type: 'string', description: 'The URL of the blog post' },
+  },
+  required: ['url'],
+  additionalProperties: false,
+})
+
 export async function POST(req: Request) {
   const { messages } = await req.json()
 
   const result = streamText({
-    model: llm.chat(process.env.LLM_MODEL || 'qwen3:4b'),
+    model: llm.chat(process.env.LLM_MODEL || 'qwen3:4b', { structuredOutputs: false }),
     system: SYSTEM_PROMPT,
     messages,
+    stopWhen: stepCountIs(5),
     tools: {
       search: tool({
         description:
           'Search NVIDIA blog posts by relevance (hybrid semantic + text) or by date. Returns top 5 results.',
-        parameters: z.object({
-          query: z.string().describe('Search query'),
-          sort_by: z
-            .enum(['relevance', 'date_desc'])
-            .optional()
-            .default('relevance')
-            .describe('Sort order: relevance (hybrid) or date_desc'),
-        }),
-        execute: async ({ query, sort_by }: { query: string; sort_by?: 'relevance' | 'date_desc' }) => {
+        inputSchema: searchSchema,
+        execute: async ({ query, sort_by }: { query: string; sort_by: 'relevance' | 'date_desc' }) => {
           if (sort_by === 'date_desc') {
             const resp = await es.search({
               index: INDEX,
@@ -88,9 +100,7 @@ export async function POST(req: Request) {
       }),
       get_full_post: tool({
         description: 'Get the full content of a blog post by its URL.',
-        parameters: z.object({
-          url: z.string().describe('The URL of the blog post (used as document ID)'),
-        }),
+        inputSchema: getFullPostSchema,
         execute: async ({ url }: { url: string }) => {
           try {
             const resp = await es.get({
