@@ -105,8 +105,12 @@ async function streamChat(question: string): Promise<string> {
   return text;
 }
 
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
 async function judge(question: string, response: string): Promise<Scores> {
-  const completion = await openai.chat.completions.create({
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
@@ -122,13 +126,24 @@ async function judge(question: string, response: string): Promise<Scores> {
     temperature: 0,
   });
 
-  const content = completion.choices[0]?.message?.content || "{}";
-  try {
-    const cleaned = content.replace(/```json\n?|```/g, "").trim();
-    return JSON.parse(cleaned);
-  } catch {
-    return { relevance: 0, citation: 0, accuracy: 0, notes: "Failed to parse judge response" };
+      const content = completion.choices[0]?.message?.content || "{}";
+      try {
+        const cleaned = content.replace(/```json\n?|```/g, "").trim();
+        return JSON.parse(cleaned);
+      } catch {
+        return { relevance: 0, citation: 0, accuracy: 0, notes: "Failed to parse judge response" };
+      }
+    } catch (e: any) {
+      if (e?.status === 429) {
+        const wait = Math.max(5, (attempt + 1) * 5);
+        process.stdout.write(`[rate-limited, waiting ${wait}s]`);
+        await sleep(wait * 1000);
+        continue;
+      }
+      throw e;
+    }
   }
+  return { relevance: 0, citation: 0, accuracy: 0, notes: "Rate limit exhausted" };
 }
 
 async function main() {
@@ -147,6 +162,7 @@ async function main() {
 
     results.push({ category: tc.category, question: tc.question, response, scores });
     console.log(` R:${scores.relevance} C:${scores.citation} A:${scores.accuracy}`);
+    await sleep(4500); // avoid rate limit (15 req/min)
   }
 
   // Category averages

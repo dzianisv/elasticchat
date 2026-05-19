@@ -10,7 +10,7 @@ config({ path: '.env.local' })
 
 const ES_URL = process.env.ELASTICSEARCH_URL || 'http://localhost:9200'
 const AZURE_EMBED_URL = 'https://vibe-dev-ai.cognitiveservices.azure.com/openai/v1'
-const AZURE_AI_KEY = process.env.AZURE_AI_KEY!
+const AZURE_AI_KEY = process.env.AZURE_AI_KEY || process.env.AZURE_DEV_AI_API_KEY!
 const EMBED_MODEL = 'Cohere-embed-v3-english'
 const EMBED_DIMS = 1024
 
@@ -19,12 +19,12 @@ const CRAWL_INDEX = 'crawl-state'
 const WP_API = 'https://blogs.nvidia.com/wp-json/wp/v2/posts'
 
 const LIMIT = parseInt(process.argv[2] || '50', 10)
-const CONCURRENCY = 5
+const CONCURRENCY = 1
 const PAGE_DELAY = 200
 
 const es = new Client({ node: ES_URL })
 
-async function embedTexts(texts: string[]): Promise<number[][]> {
+async function embedTexts(texts: string[], retries = 3): Promise<number[][]> {
   const resp = await fetch(`${AZURE_EMBED_URL}/embeddings`, {
     method: 'POST',
     headers: {
@@ -33,6 +33,12 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
     },
     body: JSON.stringify({ input: texts, model: EMBED_MODEL }),
   })
+  if (resp.status === 429 && retries > 0) {
+    const wait = 65000 // wait 65s for rate limit reset
+    console.log(`  Rate limited, waiting ${wait/1000}s...`)
+    await new Promise((r) => setTimeout(r, wait))
+    return embedTexts(texts, retries - 1)
+  }
   if (!resp.ok) throw new Error(`Embed failed: ${resp.status} ${await resp.text()}`)
   const data = await resp.json()
   return data.data.map((d: any) => d.embedding)
@@ -104,8 +110,19 @@ async function updateCrawlState(url: string, hash: string) {
   })
 }
 
+async function fetchPostContent(url: string): Promise<string> {
+  const resp = await fetch(url)
+  if (!resp.ok) throw new Error(`Failed to fetch ${url}: ${resp.status}`)
+  const html = await resp.text()
+  // Extract main article content
+  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i)
+    || html.match(/<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/i)
+    || html.match(/<div[^>]*class="[^"]*post-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i)
+  return articleMatch ? articleMatch[1] : html
+}
+
 async function processPost(post: WPPost) {
-  const contentHtml = post.content.rendered
+  const contentHtml = post.content?.rendered || await fetchPostContent(post.link)
   const hash = sha256(contentHtml)
 
   const existingHash = await getCrawlState(post.link)
