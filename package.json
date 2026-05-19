@@ -17,6 +17,8 @@
     "@elastic/elasticsearch": "^8.19.1",
     "ai": "^6.0.185",
     "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "langfuse": "^3.38.20",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",

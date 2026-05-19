@@ -1,17 +1,35 @@
 // @ts-nocheck
-import { streamText, tool, jsonSchema, stepCountIs } from 'ai'
+import { streamText, generateText, tool, jsonSchema, stepCountIs } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
 import { es } from '@/lib/elasticsearch'
 import { embedTexts } from '@/lib/embeddings'
+import { Langfuse } from 'langfuse'
 
 export const maxDuration = 60
+
+let langfuse: Langfuse | null = null
+try {
+  if (process.env.LANGFUSE_SECRET_KEY) {
+    langfuse = new Langfuse({
+      publicKey: process.env.LANGFUSE_PUBLIC_KEY || '',
+      secretKey: process.env.LANGFUSE_SECRET_KEY || '',
+      baseUrl: process.env.LANGFUSE_BASEURL || 'https://cloud.langfuse.com',
+    })
+  }
+} catch {
+  // Langfuse not available, continue without tracing
+}
 
 const llm = createOpenAI({
   apiKey: process.env.LLM_API_KEY || 'ollama',
   baseURL: process.env.LLM_BASE_URL || 'http://localhost:11434/v1',
 })
 
-const SYSTEM_PROMPT = `You are an NVIDIA blog assistant. Search for relevant blog posts to answer questions about NVIDIA technology, products, and announcements. Always cite sources with URLs. If the user's question is ambiguous, ask for clarification.`
+const SYSTEM_PROMPT = `You are an NVIDIA blog assistant. Search for relevant blog posts to answer questions about NVIDIA technology, products, and announcements.
+
+When citing sources, use numbered citations like [1], [2], [3] etc. referencing search results by their index number in the order they were returned. At the end of your response, list the full references with URLs.
+
+If the user's question is ambiguous, ask for clarification.`
 
 const INDEX = 'nvidia-blogs'
 
@@ -20,6 +38,9 @@ const searchSchema = jsonSchema({
   properties: {
     query: { type: 'string', description: 'Search query' },
     sort_by: { type: 'string', enum: ['relevance', 'date_desc'], description: 'Sort order. Default relevance.' },
+    doc_type: { type: 'string', enum: ['blog_post', 'press_release', 'tutorial', 'announcement'], description: 'Filter by document type' },
+    tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tags (e.g. H100, CUDA)' },
+    limit: { type: 'number', description: 'Max results to return (default 5)' },
   },
   required: ['query', 'sort_by'],
   additionalProperties: false,
@@ -37,6 +58,28 @@ const getFullPostSchema = jsonSchema({
 export async function POST(req: Request) {
   const { messages } = await req.json()
 
+  const trace = langfuse?.trace({
+    name: 'chat-request',
+    metadata: { messageCount: messages.length },
+  })
+
+  // Query rewrite for multi-turn conversations
+  let rewrittenQuery: string | null = null
+  if (messages.length > 2) {
+    try {
+      const recentMessages = messages.slice(-6)
+      const rewriteResult = await generateText({
+        model: llm.chat(process.env.LLM_MODEL || 'gpt-4o-mini'),
+        system: "Rewrite the user's last message as a standalone search query using the conversation context. Output only the query, nothing else.",
+        messages: recentMessages,
+      })
+      rewrittenQuery = rewriteResult.text?.trim() || null
+      trace?.generation({ name: 'query-rewrite', output: rewrittenQuery })
+    } catch {
+      // Fall back to original query
+    }
+  }
+
   const result = streamText({
     model: llm.chat(process.env.LLM_MODEL || 'qwen3:4b', { structuredOutputs: false }),
     system: SYSTEM_PROMPT,
@@ -47,39 +90,42 @@ export async function POST(req: Request) {
         description:
           'Search NVIDIA blog posts by relevance (hybrid semantic + text) or by date. Returns top 5 results.',
         inputSchema: searchSchema,
-        execute: async ({ query, sort_by }: { query: string; sort_by: 'relevance' | 'date_desc' }) => {
+        execute: async ({ query, sort_by, doc_type, tags, limit }: { query: string; sort_by: 'relevance' | 'date_desc'; doc_type?: string; tags?: string[]; limit?: number }) => {
+          const size = limit || 5
+          const filters: any[] = []
+          if (doc_type) filters.push({ term: { doc_type } })
+          if (tags && tags.length > 0) filters.push({ terms: { tags } })
+
           if (sort_by === 'date_desc') {
+            const must: any = { multi_match: { query, fields: ['title^2', 'content'] } }
+            const searchQuery = filters.length > 0
+              ? { bool: { must, filter: filters } }
+              : must
             const resp = await es.search({
               index: INDEX,
-              size: 5,
-              query: {
-                multi_match: {
-                  query,
-                  fields: ['title^2', 'content'],
-                },
-              },
+              size,
+              query: searchQuery,
               sort: [{ date: { order: 'desc' } }],
-              _source: ['title', 'url', 'date', 'content'],
+              _source: ['title', 'url', 'date', 'content', 'doc_type', 'tags'],
             })
             return formatHits(resp.hits.hits)
           }
 
           // Hybrid search with RRF
           const [embedding] = await embedTexts([query])
+          const standardQuery = filters.length > 0
+            ? { bool: { must: { multi_match: { query, fields: ['title^2', 'content'] } }, filter: filters } }
+            : { multi_match: { query, fields: ['title^2', 'content'] } }
+
           const resp = await es.search({
             index: INDEX,
-            size: 5,
+            size,
             retriever: {
               rrf: {
                 retrievers: [
                   {
                     standard: {
-                      query: {
-                        multi_match: {
-                          query,
-                          fields: ['title^2', 'content'],
-                        },
-                      },
+                      query: standardQuery,
                     },
                   },
                   {
@@ -88,12 +134,13 @@ export async function POST(req: Request) {
                       query_vector: embedding,
                       k: 20,
                       num_candidates: 100,
+                      ...(filters.length > 0 ? { filter: { bool: { filter: filters } } } : {}),
                     },
                   },
                 ],
               },
             },
-            _source: ['title', 'url', 'date', 'content'],
+            _source: ['title', 'url', 'date', 'content', 'doc_type', 'tags'],
           })
           return formatHits(resp.hits.hits)
         },
@@ -103,17 +150,28 @@ export async function POST(req: Request) {
         inputSchema: getFullPostSchema,
         execute: async ({ url }: { url: string }) => {
           try {
-            const resp = await es.get({
+            const resp = await es.search({
               index: INDEX,
-              id: url,
+              size: 100,
+              query: {
+                term: { parent_url: url },
+              },
+              sort: [{ _score: { order: 'desc' } }],
               _source: ['title', 'url', 'date', 'content'],
             })
-            const src = resp._source as Record<string, unknown>
+            const hits = resp.hits.hits
+            if (hits.length === 0) {
+              return { error: 'Post not found' }
+            }
+            const first = hits[0]._source as Record<string, unknown>
+            const content = hits
+              .map((hit: any) => String((hit._source as Record<string, unknown>).content || ''))
+              .join('\n\n')
             return {
-              title: src.title,
-              url: src.url,
-              date: src.date,
-              content: src.content,
+              title: first.title,
+              url: first.url,
+              date: first.date,
+              content,
             }
           } catch {
             return { error: 'Post not found' }
@@ -121,16 +179,32 @@ export async function POST(req: Request) {
         },
       }),
     },
+    onFinish: async ({ usage }) => {
+      try {
+        trace?.generation({
+          name: 'chat-completion',
+          usage: {
+            input: usage?.promptTokens,
+            output: usage?.completionTokens,
+            total: usage?.totalTokens,
+          },
+        })
+        await langfuse?.flushAsync()
+      } catch {
+        // Ignore langfuse errors
+      }
+    },
   })
 
   return result.toUIMessageStreamResponse()
 }
 
 function formatHits(hits: any[]) {
-  return hits.map((hit) => {
+  return hits.map((hit, index) => {
     const src = hit._source as Record<string, unknown>
     const content = String(src.content || '')
     return {
+      index: index + 1,
       title: src.title,
       url: src.url,
       date: src.date,
