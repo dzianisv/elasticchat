@@ -35,10 +35,6 @@ async function run() {
   // Create index on remote (ignore if exists)
   const createBody = {
     mappings: indexSettings.mappings,
-    settings: {
-      number_of_shards: 1,
-      number_of_replicas: 1,
-    },
   };
 
   const createRes = await fetch(`${remoteUrl}/${INDEX}`, {

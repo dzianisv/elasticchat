@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { streamText, generateText, tool, jsonSchema, stepCountIs } from 'ai'
-import { createOpenAI } from '@ai-sdk/openai'
+import { createAzure } from '@ai-sdk/azure'
 import { es } from '@/lib/elasticsearch'
 import { embedTexts } from '@/lib/embeddings'
 import { Langfuse } from 'langfuse'
@@ -20,9 +20,12 @@ try {
   // Langfuse not available, continue without tracing
 }
 
-const llm = createOpenAI({
-  apiKey: process.env.LLM_API_KEY || 'ollama',
-  baseURL: process.env.LLM_BASE_URL || 'http://localhost:11434/v1',
+const llm = createAzure({
+  apiKey: process.env.AZURE_OPENAI_API_KEY,
+  baseURL: process.env.AZURE_OPENAI_ENDPOINT ? `${process.env.AZURE_OPENAI_ENDPOINT}/openai` : undefined,
+  resourceName: process.env.AZURE_OPENAI_RESOURCE_NAME || 'info-mjnxtt51-eastus2',
+  apiVersion: process.env.AZURE_OPENAI_API_VERSION || '2025-01-01-preview',
+  useDeploymentBasedUrls: true,
 })
 
 const SYSTEM_PROMPT = `You are an NVIDIA blog assistant that answers questions using search results.
@@ -79,7 +82,7 @@ export async function POST(req: Request) {
     try {
       const recentMessages = messages.slice(-6)
       const rewriteResult = await generateText({
-        model: llm.chat(process.env.LLM_MODEL || 'gpt-4o-mini'),
+        model: llm.chat(process.env.LLM_MODEL_MINI || 'gpt-5.4-nano'),
         system: "Rewrite the user's last message as a standalone search query using the conversation context. Output only the query, nothing else.",
         messages: recentMessages,
       })
@@ -91,7 +94,7 @@ export async function POST(req: Request) {
   }
 
   const result = streamText({
-    model: llm.chat(process.env.LLM_MODEL || 'qwen3:4b', { structuredOutputs: false }),
+    model: llm.chat(process.env.LLM_MODEL || 'gpt-5.4-nano'),
     system: SYSTEM_PROMPT,
     messages,
     stopWhen: stepCountIs(5),
