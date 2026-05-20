@@ -9,37 +9,52 @@ test.describe('ElasticChat E2E', () => {
     await expect(input).toBeVisible({ timeout: 15000 });
   });
 
-  test('chat input accepts text and send button works', async ({ page }) => {
+  test('chat shows assistant response in real browser', async ({ page }) => {
+    test.setTimeout(120_000);
     await page.goto(BASE_URL);
+
     const input = page.getByPlaceholder('Ask about NVIDIA blog posts...');
     await expect(input).toBeVisible({ timeout: 15000 });
 
-    // Verify send button is disabled when empty
-    const sendBtn = page.getByRole('button', { name: 'Send' });
-    await expect(sendBtn).toBeDisabled();
+    await input.fill('What is DGX Spark?');
+    await page.keyboard.press('Enter');
 
-    // Type and verify send button enables
-    await input.fill('what is NVIDIA');
-    await expect(sendBtn).toBeEnabled();
+    // Wait for actual assistant text to render
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('[data-slot="aui_assistant-message-content"]');
+        return !!el && (el.textContent || '').length > 80;
+      },
+      { timeout: 60_000 }
+    );
 
-    // Submit and verify user message appears
-    await sendBtn.click();
-    await expect(page.locator('.justify-end .rounded-lg')).toBeVisible({ timeout: 5000 });
+    const text = await page
+      .locator('[data-slot="aui_assistant-message-content"]')
+      .first()
+      .innerText();
 
-    // Verify "Thinking..." indicator appears (streaming started)
-    await expect(page.locator('text=Thinking...')).toBeVisible({ timeout: 10000 });
+    expect(text.toLowerCase()).toMatch(/nvidia|dgx|spark|gpu/);
   });
 
-  test('chat API returns streaming response with citations', async ({ request }) => {
+  test('chat API returns streaming UIMessage response with citations', async ({ request }) => {
     const response = await request.post(`${BASE_URL}/api/chat`, {
       headers: { 'Content-Type': 'application/json' },
-      data: { messages: [{ role: 'user', content: 'what latest gpu was released by nvidia' }] },
+      data: {
+        id: 'test',
+        messages: [
+          {
+            id: 'm1',
+            role: 'user',
+            parts: [{ type: 'text', text: 'what latest gpu was released by nvidia' }],
+          },
+        ],
+        trigger: 'submit-message',
+      },
     });
     expect(response.ok()).toBeTruthy();
 
     const body = await response.text();
-    // Parse SSE text-deltas
-    const lines = body.split('\n').filter(l => l.startsWith('data: '));
+    const lines = body.split('\n').filter((l) => l.startsWith('data: '));
     let text = '';
     for (const line of lines) {
       try {
@@ -48,7 +63,6 @@ test.describe('ElasticChat E2E', () => {
       } catch {}
     }
 
-    console.log('API response:', text.slice(0, 200));
     expect(text.length).toBeGreaterThan(50);
     expect(text.toLowerCase()).toMatch(/nvidia|gpu|rtx|geforce|blackwell|hopper|vera|rubin/i);
     expect(text.toLowerCase()).toMatch(/nvidia\.com|blogs\.nvidia/i);

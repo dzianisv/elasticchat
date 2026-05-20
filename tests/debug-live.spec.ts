@@ -34,22 +34,23 @@ test('debug: real user flow on live site', async ({ page }) => {
 
   await page.keyboard.press('Enter');
 
-  // Wait for streaming to finish — give it up to 60s
-  // The "Thinking..." indicator only shows while status is streaming/submitted
-  try {
-    await page.waitForFunction(
-      () => !document.body.textContent?.includes('Thinking...'),
-      { timeout: 60000 }
-    );
-  } catch {
-    // even if still thinking, screenshot and continue
-  }
+  // Wait for actual assistant text to land. The assistant-ui Thread renders
+  // assistant messages with data-slot="aui_assistant-message-content".
+  await page.waitForFunction(
+    () => {
+      const el = document.querySelector('[data-slot="aui_assistant-message-content"]')
+      return el && (el.textContent || '').length > 80
+    },
+    { timeout: 60000 }
+  ).catch(() => {})
 
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(1500);
   await page.screenshot({ path: 'test-results/03-after-send.png', fullPage: true });
 
   const allText = await page.evaluate(() => document.body.innerText);
-  const assistantBubbles = await page.locator('.justify-start > div').allInnerTexts();
+  const assistantBubbles = await page
+    .locator('[data-slot="aui_assistant-message-content"]')
+    .allInnerTexts();
 
   console.log('=== ALL VISIBLE TEXT ===');
   console.log(allText);
