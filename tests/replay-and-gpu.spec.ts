@@ -71,13 +71,22 @@ test('latest GPU question: answer mentions a GPU, not just a CPU', async ({
   console.log('=== latest-GPU answer ===');
   console.log(text);
 
-  // The answer must mention an actual GPU product, not just a CPU/platform.
+  // The answer must mention an actual GPU product (Blackwell / RTX 50 / Rubin
+  // — not just a CPU/networking part).
   expect(text).toMatch(
-    /(geforce|rtx|blackwell|hopper|ampere|ada|rubin|b\d{3}|h\d{3}|a\d{3}|rtx pro|gpu)/i,
+    /(geforce|rtx\s*5|blackwell|rubin|b100|b200|gb200)/i,
   );
 
-  // Sanity: it should not claim the latest *GPU* is a CPU.
-  expect(text).not.toMatch(/latest\s+(nvidia\s+)?gpu[^.]*?\b(vera|grace|bluefield)\b/i);
+  // Sanity: it should not name a non-GPU product (Vera/Grace CPU,
+  // BlueField DPU, Spectrum-X switch) AS the latest GPU. Allowed: "Vera Rubin"
+  // when paired with Rubin, since Rubin is a GPU.
+  expect(text).not.toMatch(
+    /latest[^.]*?gpu[^.]*?\b(grace|bluefield|spectrum-x)\b/i,
+  );
+  // Allow "Vera Rubin" (Rubin is a GPU) but flag bare "Vera" as the answer.
+  expect(text).not.toMatch(
+    /latest[^.]*?\bvera\b(?!\s+rubin)[^.]*?\bgpu\b/i,
+  );
 
   await page.screenshot({
     path: 'test-results/gpu-answer.png',

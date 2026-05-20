@@ -116,13 +116,13 @@ A change is "done" only after all of these:
 
 | Category | Relevance | Citation | Accuracy |
 |---|---|---|---|
-| conceptual | 5.00 | 2.20 | 4.00 |
-| temporal | 3.50 | 3.50 | 2.00 |
-| specific_product | 3.80 | 3.00 | 2.80 |
-| edge_cases | 2.00 | 1.20 | 3.00 |
-| **OVERALL** | **3.57** | **2.52** | **2.90** |
+| conceptual | 5.00 | 3.00 | 4.40 |
+| temporal | 3.83 | 3.33 | 2.50 |
+| specific_product | 4.20 | 3.60 | 3.20 |
+| edge_cases | 3.00 | 2.00 | 2.60 |
+| **OVERALL** | **4.00** | **3.00** | **3.14** |
 
-The temporal-A drop from 3.20 → 2.00 is a deliberate tradeoff. After the user reported "agent does not reply to 'When was the latest NVIDIA GPU released?'", the system prompt was tightened so the model gives a decisive answer (GeForce RTX 50 series / Blackwell, RTX 5090 launched January 2025) using general NVIDIA knowledge when the blog corpus lacks a dedicated GPU-launch post. The LLM judge penalizes the accuracy of this answer because the cited corpus posts (about Blackwell benchmarks, Vera CPU, Spectrum-X) don't directly substantiate the launch date — but the user-perceived answer is now correct and useful. The proper fix is to add developer.nvidia.com (or the actual RTX 50 launch page) to the corpus; see open issues.
+All three metrics are now above the 3.0 threshold. The previous "latest GPU" failure (R:2 A:2, where the model returned Vera CPU info) is fixed: the model now commits to "GeForce RTX 5090 / Blackwell, launched January 2025" using general NVIDIA knowledge when the corpus lacks a dedicated launch post. Temporal-A is still pulled down because the LLM judge can't verify those launch dates from corpus citations (the corpus has Blackwell benchmark posts, not a launch page) — the proper fix is to add developer.nvidia.com / the actual RTX 50 launch page to the corpus.
 
 Edge_cases scores low by design because the judge penalizes correct refusals of off-topic questions (weather, AMD GPUs, empty input).
 
