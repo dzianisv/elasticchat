@@ -1,0 +1,97 @@
+# Promptfoo evaluation config for ElasticChat
+# Run: npx promptfoo eval
+
+description: "ElasticChat NVIDIA blog assistant quality evaluation"
+
+providers:
+  - id: http
+    config:
+      url: "{{BASE_URL | default: 'https://elasticchat.vercel.app'}}/api/chat"
+      method: POST
+      headers:
+        Content-Type: application/json
+      body:
+        messages:
+          - role: user
+            content: "{{prompt}}"
+      responseParser: |
+        // Parse SSE stream and extract text deltas
+        const lines = output.split('\n').filter(l => l.startsWith('data: '));
+        let text = '';
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === 'text-delta') text += data.delta;
+          } catch(e) {}
+        }
+        return text;
+
+prompts:
+  - "what latest gpu was released by nvidia"
+  - "tell me about recent nvidia robotics announcements"
+  - "what is nvidia NeMo framework"
+  - "what are the newest blog posts on nvidia"
+  - "nvidia DGX features"
+
+defaultTest:
+  options:
+    provider: "azureopenai:chat:gpt-4o-mini"
+  assert:
+    # G-Eval: LLM judges relevance
+    - type: llm-rubric
+      value: |
+        You are evaluating a RAG chatbot that answers questions about NVIDIA using blog posts.
+        
+        Score the response on these criteria (each 1-5):
+        1. RELEVANCE: Does the answer directly address the user's question?
+        2. CITATION: Does it cite specific URLs from blogs.nvidia.com?
+        3. ACCURACY: Are the stated facts correct and not hallucinated?
+        4. GROUNDEDNESS: Is the answer based on retrieved documents rather than general knowledge?
+        
+        The response PASSES if the average score across all dimensions is >= 3.0.
+        
+        If the chatbot says it couldn't find relevant information, that's acceptable for obscure queries
+        but should fail for questions clearly covered by NVIDIA's blog (GPUs, announcements, etc).
+      threshold: 0.6
+
+    # Must contain some content
+    - type: javascript
+      value: "output.length > 100"
+
+    # Should reference nvidia.com
+    - type: contains-any
+      value:
+        - "nvidia.com"
+        - "blogs.nvidia.com"
+        - "NVIDIA"
+
+tests:
+  - vars:
+      prompt: "what latest gpu was released by nvidia"
+    assert:
+      - type: contains-any
+        value: ["GPU", "RTX", "GeForce", "Blackwell", "Hopper", "Ada"]
+
+  - vars:
+      prompt: "tell me about recent nvidia robotics announcements"
+    assert:
+      - type: contains-any
+        value: ["robot", "Isaac", "Jetson", "autonomous"]
+
+  - vars:
+      prompt: "what is nvidia NeMo framework"
+    assert:
+      - type: contains-any
+        value: ["NeMo", "LLM", "language model", "AI"]
+
+  - vars:
+      prompt: "what are the newest blog posts on nvidia"
+    assert:
+      - type: javascript
+        value: "output.includes('http') || output.includes('nvidia.com')"
+
+  - vars:
+      prompt: "nvidia DGX features"
+    assert:
+      - type: contains-any
+        value: ["DGX", "GPU", "compute", "AI"]
