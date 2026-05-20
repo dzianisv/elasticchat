@@ -66,8 +66,9 @@ async function fetchRss(feedUrl: string, sourceLabel: string): Promise<FeedItem[
   const xml = await res.text()
   const $ = cheerio.load(xml, { xmlMode: true })
   const items: FeedItem[] = []
+
+  // RSS 2.0: <item> with <link> text node and <pubDate>
   $('item').each((_, el) => {
-    // <link> in RSS 2.0 is a text node (not an attribute)
     const url =
       $(el).find('link').text().trim() ||
       $(el).find('guid').text().trim()
@@ -75,6 +76,19 @@ async function fetchRss(feedUrl: string, sourceLabel: string): Promise<FeedItem[
     const date = $(el).find('pubDate').text().trim()
     if (url.startsWith('http')) items.push({ url, title, date, source: sourceLabel })
   })
+
+  // Atom: <entry> with <link rel="alternate" href="..."> and <published>
+  if (items.length === 0) {
+    $('entry').each((_, el) => {
+      const url =
+        $(el).find('link[rel="alternate"]').attr('href') ||
+        $(el).find('link').attr('href') || ''
+      const title = $(el).find('title').text().trim()
+      const date = $(el).find('published').text().trim() || $(el).find('updated').text().trim()
+      if (url.startsWith('http')) items.push({ url, title, date, source: sourceLabel })
+    })
+  }
+
   return items
 }
 
@@ -123,13 +137,8 @@ async function fetchFromDeveloperBlog(limit: number): Promise<FeedItem[]> {
 }
 
 async function fetchFromPressRoom(limit: number): Promise<FeedItem[]> {
-  // RSS confirmed 200 OK at this URL
   const items = await tryFeeds(
-    [
-      'https://nvidianews.nvidia.com/rss',
-      'https://nvidianews.nvidia.com/releases.rss',
-      'https://nvidianews.nvidia.com/news.rss',
-    ],
+    ['https://nvidianews.nvidia.com/rss.xml'],
     'nvidianews.nvidia.com',
   )
   return items.slice(0, limit)
