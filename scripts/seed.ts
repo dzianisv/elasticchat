@@ -23,12 +23,16 @@ for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
 }
 
 const LIMIT = parseInt(process.argv[2] || '200', 10)
-// Newest-first: sitemap3 has the most recent posts, sitemap1 has the oldest.
-const SITEMAPS = [
+// Optional second arg picks a single sitemap: 1, 2, or 3 (newest)
+const SITEMAP_ARG = process.argv[3]
+const ALL_SITEMAPS = [
   'https://blogs.nvidia.com/post-sitemap3.xml',
   'https://blogs.nvidia.com/post-sitemap2.xml',
   'https://blogs.nvidia.com/post-sitemap.xml',
 ]
+const SITEMAPS = SITEMAP_ARG
+  ? [`https://blogs.nvidia.com/post-sitemap${SITEMAP_ARG === '1' ? '' : SITEMAP_ARG}.xml`]
+  : ALL_SITEMAPS
 const INDEX = 'nvidia-blogs'
 const CRAWL_INDEX = 'crawl-state'
 const CHUNK_SIZE = 2000
@@ -42,7 +46,11 @@ const es = new Client({
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-async function embedTexts(texts: string[], retries = 5): Promise<number[][]> {
+const SKIP_EMBED = process.env.SKIP_EMBED === '1'
+let embedDailyExhausted = false
+
+async function embedTexts(texts: string[], retries = 5): Promise<number[][] | null> {
+  if (SKIP_EMBED || embedDailyExhausted) return null
   for (let attempt = 0; attempt <= retries; attempt++) {
     const res = await fetch(`${process.env.AZURE_DEV_AI_BASE_URL}/embeddings`, {
       method: 'POST',
@@ -56,12 +64,20 @@ async function embedTexts(texts: string[], retries = 5): Promise<number[][]> {
       const data = await res.json()
       return data.data.map((d: { embedding: number[] }) => d.embedding)
     }
-    if (res.status === 429 && attempt < retries) {
-      console.warn(`  embed 429, waiting 65s (attempt ${attempt + 1})`)
-      await sleep(65_000)
-      continue
+    const body = await res.text()
+    if (res.status === 429) {
+      if (body.includes('UserByModelByDay') || body.includes('per_86400')) {
+        console.warn('  embed daily quota exhausted — continuing without embeddings')
+        embedDailyExhausted = true
+        return null
+      }
+      if (attempt < retries) {
+        console.warn(`  embed 429, waiting 65s (attempt ${attempt + 1})`)
+        await sleep(65_000)
+        continue
+      }
     }
-    throw new Error(`embed failed: ${res.status} ${await res.text()}`)
+    throw new Error(`embed failed: ${res.status} ${body}`)
   }
   throw new Error('embed retries exhausted')
 }
@@ -189,26 +205,31 @@ async function indexPost(item: FeedItem): Promise<'indexed' | 'unchanged' | 'ski
   const chunks = chunkText(content)
   if (chunks.length === 0) return 'skipped'
 
-  const allEmbeddings: number[][] = []
+  let allEmbeddings: (number[] | null)[] = chunks.map(() => null)
   for (let i = 0; i < chunks.length; i += 16) {
     const batch = chunks.slice(i, i + 16)
     const embeddings = await embedTexts(batch)
-    allEmbeddings.push(...embeddings)
-    if (i + 16 < chunks.length) await sleep(4500)
+    if (embeddings) {
+      for (let j = 0; j < embeddings.length; j++) allEmbeddings[i + j] = embeddings[j]
+      if (i + 16 < chunks.length) await sleep(4500)
+    } else {
+      // Embeddings unavailable for the rest of this run; index BM25-only
+      break
+    }
   }
 
   const date = item.date ? new Date(item.date).toISOString() : new Date().toISOString()
-  const ops = chunks.flatMap((chunk, i) => [
-    { index: { _index: INDEX, _id: `${item.url}#${i}` } },
-    {
+  const ops = chunks.flatMap((chunk, i) => {
+    const doc: Record<string, unknown> = {
       url: item.url,
       title,
       date,
       content: chunk,
       chunk_index: i,
-      embedding: allEmbeddings[i],
-    },
-  ])
+    }
+    if (allEmbeddings[i]) doc.embedding = allEmbeddings[i]
+    return [{ index: { _index: INDEX, _id: `${item.url}#${i}` } }, doc]
+  })
   await es.bulk({ refresh: false, operations: ops })
 
   await es.index({
@@ -252,8 +273,8 @@ async function main() {
       errors++
       console.error(`[${i + 1}/${items.length}] error ${item.url}: ${(e as Error).message}`)
     }
-    // Pace between posts to spread embed load
-    await sleep(4500)
+    // Pace between posts to spread embed load (no-op when embeddings skipped)
+    if (!SKIP_EMBED && !embedDailyExhausted) await sleep(4500)
   }
 
   // Refresh index so search sees new docs

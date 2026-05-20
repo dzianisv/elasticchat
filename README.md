@@ -1,36 +1,84 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ElasticChat — NVIDIA Blog Assistant
 
-## Getting Started
+RAG chatbot that answers questions about NVIDIA using passages indexed from the [NVIDIA Blog](https://blogs.nvidia.com).
 
-First, run the development server:
+**Live:** https://elasticchat.vercel.app/
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```
+User ─▶ Next.js UI (useChat) ─▶ /api/chat ─▶ Azure OpenAI (gpt-5.4-nano)
+                                                │
+                                                ▼ tool: search
+                                       Elasticsearch RRF(BM25 + kNN)
+                                                │
+                                                ▼ tool: get_full_post
+                                       (Cohere-embed-v3, 1024-d vectors)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+A daily Vercel cron pulls new posts from the NVIDIA blog feed, chunks them, embeds them, and indexes them into Elasticsearch.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Stack
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Next.js 16** (App Router, Turbopack, React 19)
+- **AI SDK v6** — `@ai-sdk/react` `useChat`, `@ai-sdk/azure` `streamText`
+- **Elasticsearch 8** — `nvidia-blogs` index (BM25 + dense vector, RRF retriever)
+- **Azure OpenAI** — `gpt-5.4-nano` for chat
+- **Cohere-embed-v3-english** — 1024-d embeddings via Azure dev AI
+- **Vercel** — hosting + daily cron at 02:00 UTC
+- *(optional)* **Langfuse** — request/generation tracing
 
-## Learn More
+## Local development
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+cp .env.example .env       # fill in real values
+npm install
+npm run dev
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Open http://localhost:3000.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Tests
 
-## Deploy on Vercel
+```bash
+# Playwright E2E (page, input, streaming API)
+npx playwright test tests/e2e.spec.ts
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+# Ingest + ES schema verification (needs ES creds)
+set -a && source .env && set +a
+npx playwright test tests/ingest.spec.ts
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+# G-Eval (LLM-judged quality scoring, 20 cases, ~3 min)
+EVAL_CHAT_URL=http://localhost:3000/api/chat npx tsx scripts/eval.ts
+```
+
+## Corpus management
+
+Daily cron at 02:00 UTC calls `/api/ingest` (defaults to RSS, last ~18 posts).
+
+To bulk-seed historical posts (newest first across `post-sitemap3.xml` → `post-sitemap2.xml` → `post-sitemap.xml`):
+
+```bash
+npx tsx scripts/seed.ts 200    # seed up to 200 newest posts
+```
+
+The Azure dev-AI embedding model is rate-limited (15 req/min, 150 req/day on free tier). The seeder retries on 429s; the chat search falls back to BM25-only when the daily window is exhausted.
+
+## Deployment
+
+See [DEPLOY.md](./DEPLOY.md).
+
+## Project layout
+
+| Path | Purpose |
+|------|---------|
+| `src/app/page.tsx` | Chat UI |
+| `src/app/api/chat/route.ts` | Streaming chat endpoint with `search` + `get_full_post` tools |
+| `src/app/api/ingest/route.ts` | Incremental ingest (cron target) |
+| `src/lib/elasticsearch.ts` | Lazy ES client |
+| `src/lib/embeddings.ts` | Cohere embeddings with 429 retry |
+| `src/lib/indexMappings.ts` | ES index mappings |
+| `scripts/seed.ts` | Bulk seeder from sitemaps |
+| `scripts/eval.ts` | G-Eval scorer (LLM-as-judge) |
+| `tests/e2e.spec.ts` | Playwright UI + API tests |
+| `tests/ingest.spec.ts` | ES schema and document verification |
+| `promptfooconfig.yaml` | Promptfoo quality eval (alternative to scripts/eval.ts) |
+| `vercel.json` | Daily ingest cron |

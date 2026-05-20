@@ -1,64 +1,72 @@
-# Deployment Checklist
+# Deployment
 
-## 1. Elastic Cloud Setup
+Production runs on Vercel (`bison-s-projects/elasticchat`) with Elasticsearch Cloud and Azure OpenAI as external services.
 
-1. Go to https://cloud.elastic.co/ and sign up (14-day free trial)
-2. Create a new deployment (choose closest region)
-3. Copy the **Elasticsearch endpoint URL** (e.g. `https://my-deploy.es.us-east-1.aws.elastic.co`)
-4. Create an API key: Kibana > Stack Management > API Keys > Create
-5. Copy the **base64-encoded API key**
+## Prerequisites
 
-## 2. Vercel Setup
+1. **Elasticsearch Cloud** account with a deployment provisioned, plus an API key.
+2. **Azure OpenAI** resource with `gpt-5.4-nano` (or equivalent) deployed as the chat model.
+3. **Azure dev AI** (or any provider) with `Cohere-embed-v3-english` (1024-d) for embeddings.
+4. **Vercel** project linked to this repo.
+5. *(optional)* **Langfuse** account for tracing.
 
-1. Go to https://vercel.com and sign up with GitHub
-2. Import this repository (`elasticchat`)
-3. Set the framework to **Next.js** (should auto-detect)
+## Set Vercel env vars
 
-## 3. Langfuse Setup (Optional)
+In *Project Settings → Environment Variables*:
 
-1. Go to https://langfuse.com and sign up
-2. Create a project, copy the public/secret keys and host URL
+| Key | Notes |
+|---|---|
+| `ELASTICSEARCH_URL` | e.g. `https://....es.cloud.elastic.co:443` |
+| `ELASTICSEARCH_API_KEY` | base64-encoded API key |
+| `AZURE_OPENAI_API_KEY` | chat model key |
+| `AZURE_OPENAI_ENDPOINT` | resource endpoint, no trailing path |
+| `AZURE_OPENAI_API_VERSION` | e.g. `2025-01-01-preview` |
+| `LLM_MODEL` | chat deployment name (e.g. `gpt-5.4-nano`) |
+| `LLM_MODEL_MINI` | smaller-model deployment (same model is fine) |
+| `AZURE_DEV_AI_API_KEY` | embedding model key |
+| `AZURE_DEV_AI_BASE_URL` | embedding endpoint, includes `/openai/v1` |
+| `LANGFUSE_PUBLIC_KEY` | optional |
+| `LANGFUSE_SECRET_KEY` | optional |
 
-## 4. Set Environment Variables in Vercel
-
-Go to Project Settings > Environment Variables and add:
-
-| Variable | Description |
-|----------|-------------|
-| `ELASTICSEARCH_URL` | Elastic Cloud endpoint (e.g. `https://....es.cloud.elastic.co`) |
-| `ELASTICSEARCH_API_KEY` | Base64 API key from Elastic Cloud |
-| `LLM_BASE_URL` | LLM inference endpoint URL |
-| `LLM_API_KEY` | API key for the LLM endpoint |
-| `LLM_MODEL` | Model name (e.g. `gpt-4o-mini`) |
-| `LANGFUSE_PUBLIC_KEY` | (Optional) Langfuse public key |
-| `LANGFUSE_SECRET_KEY` | (Optional) Langfuse secret key |
-| `LANGFUSE_HOST` | (Optional) Langfuse host URL |
-
-## 5. Deploy
+## Deploy
 
 ```bash
-vercel deploy --prod
+# preferred (when GitHub auto-deploy works):
+git push origin main
+
+# fallback (current state of this repo — GitHub App lacks repo access):
+set -a && source .env && set +a
+npx vercel deploy --prod --token "$VERCEL_TOKEN" --yes
 ```
 
-Or just push to `main` — Vercel will auto-deploy if the GitHub integration is connected.
+## Seed the index
 
-## 6. Migrate Data to Elastic Cloud
-
-After Elastic Cloud is provisioned, migrate your local index:
+The daily cron will keep things current, but on first deploy you need a baseline:
 
 ```bash
-ELASTICSEARCH_URL=https://your-cloud-endpoint ELASTICSEARCH_API_KEY=your-api-key npx tsx scripts/migrate-to-cloud.ts
+set -a && source .env && set +a
+npx tsx scripts/seed.ts 200
 ```
 
-This reads all documents from `http://localhost:9200/nvidia-blogs` and re-indexes them into the remote cluster.
+This pulls newest posts from the NVIDIA blog sitemaps, chunks/embeds them, and indexes into the configured Elasticsearch cluster. Subject to the embedding model's daily quota (free tier: 150 req/day).
 
-### Alternative: elasticdump
+## Cron
+
+`vercel.json` configures a daily cron at 02:00 UTC calling `/api/ingest`. Each run picks up posts new since the last run (idempotent via `crawl-state` content-hash).
+
+## Smoke test live
 
 ```bash
-npx elasticdump --input=http://localhost:9200/nvidia-blogs --output=https://your-cloud-endpoint/nvidia-blogs --type=mapping --headers='{"Authorization":"ApiKey YOUR_API_KEY"}'
-npx elasticdump --input=http://localhost:9200/nvidia-blogs --output=https://your-cloud-endpoint/nvidia-blogs --type=data --headers='{"Authorization":"ApiKey YOUR_API_KEY"}'
+BASE_URL=https://elasticchat.vercel.app npx playwright test tests/e2e.spec.ts
 ```
 
-## Cron Jobs
+## Re-creating the index
 
-The `vercel.json` configures a cron job at `/api/ingest` running every hour. This will work automatically once deployed to Vercel.
+If schema drift requires a clean rebuild:
+
+```bash
+set -a && source .env && set +a
+curl -X DELETE "$ELASTICSEARCH_URL/nvidia-blogs"   -H "Authorization: ApiKey $ELASTICSEARCH_API_KEY"
+curl -X DELETE "$ELASTICSEARCH_URL/crawl-state"    -H "Authorization: ApiKey $ELASTICSEARCH_API_KEY"
+npx tsx scripts/seed.ts 200
+```
