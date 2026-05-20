@@ -1,0 +1,65 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=e6]
+  - main [ref=e9]:
+    - generic [ref=e10]:
+      - generic [ref=e12]:
+        - img "Vercel logo" [ref=e14]
+        - paragraph [ref=e15]:
+          - text: Sign in to
+          - strong [ref=e16]: GitHub
+          - text: to continue to
+          - strong [ref=e17]: Vercel
+      - generic [ref=e18]:
+        - generic [ref=e19]:
+          - generic [ref=e20]:
+            - generic [ref=e21]: Username or email address
+            - textbox "Username or email address" [active] [ref=e22]
+          - generic [ref=e23]:
+            - generic [ref=e24]: Password
+            - textbox "Password" [ref=e25]
+            - link "Forgot password?" [ref=e26] [cursor=pointer]:
+              - /url: /password_reset
+          - button "Sign in" [ref=e28] [cursor=pointer]
+        - generic [ref=e29]:
+          - generic [ref=e31]: or
+          - button "Continue with Google" [ref=e33] [cursor=pointer]:
+            - generic [ref=e34]:
+              - generic:
+                - img:
+                  - img
+              - generic [ref=e35]: Continue with Google
+          - button "Continue with Apple" [ref=e37] [cursor=pointer]:
+            - generic [ref=e38]:
+              - generic:
+                - img:
+                  - img
+              - generic [ref=e39]: Continue with Apple
+      - generic [ref=e40]:
+        - paragraph [ref=e42]:
+          - text: New to GitHub?
+          - link "Create an account" [ref=e43] [cursor=pointer]:
+            - /url: /join?return_to=%2Flogin%2Foauth%2Fauthorize%3Fclient_id%3DIv1.9d7d662ea00b8481%26scope%3Dread%253Auser%252Cuser%253Aemail%26state%3D71203ab93a3113c789d651824b6f767d8541c4a340d2263976d0f9e13b5824d23f45cd787feab37413172779df8d360cae9b0701cad4bbcf9619919fb93596d6cbf337a37b48c7f519a1e98ff1860672d157925992c7d77f1f53e8c7edf202979c4b8187c6b7fe8811798fd1702b2a81093d16db8f3b9f24cf0aea731c59e7ee09ef2b28dbe98df234677400ffee1c1b0ec3dba4dfc73a7e13232d1e188c85c0669b7ab250d0e11467c5a6bac90ed3007387e5e198244532023ba5ac1a5cce2951a93bacf733f51a89d1d71804b7cb0310c865f11e953de91532573493b03b062ad2dcc4434431ed7bc5a6215855c4abe8234ebbdd81b613bef2e34067a850fd8596dc2d7cb6a002fe18f6dc5f4244323a7496afe7c43d4cfe53c7109bb3f9b3c7a7f14a2c4a6093eda14d1f18c00136da27c7f8ff1ce6026c60b2aea31575a15b171c69e4d5a7420483&source=oauth
+        - paragraph [ref=e45]:
+          - button "Sign in with a passkey" [ref=e46] [cursor=pointer]:
+            - generic [ref=e48]: Sign in with a passkey
+  - contentinfo [ref=e49]:
+    - list [ref=e50]:
+      - listitem [ref=e51]:
+        - link "Terms" [ref=e52] [cursor=pointer]:
+          - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+      - listitem [ref=e53]:
+        - link "Privacy" [ref=e54] [cursor=pointer]:
+          - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+      - listitem [ref=e55]:
+        - link "Docs" [ref=e56] [cursor=pointer]:
+          - /url: https://docs.github.com
+      - listitem [ref=e57]:
+        - link "Contact GitHub Support" [ref=e58] [cursor=pointer]:
+          - /url: https://support.github.com
+      - listitem [ref=e59]:
+        - button "Manage cookies" [ref=e61] [cursor=pointer]
+      - listitem [ref=e62]:
+        - button "Do not share my personal information" [ref=e64] [cursor=pointer]

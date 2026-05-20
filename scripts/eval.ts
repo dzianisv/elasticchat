@@ -2,7 +2,7 @@ import "dotenv/config";
 import { readFileSync } from "fs";
 import { writeFileSync } from "fs";
 import { resolve } from "path";
-import OpenAI from "openai";
+import { AzureOpenAI } from "openai";
 
 // Load .env.local
 const envPath = resolve(process.cwd(), ".env.local");
@@ -12,12 +12,13 @@ for (const line of envContent.split("\n")) {
   if (match) process.env[match[1].trim()] = match[2].trim();
 }
 
-const openai = new OpenAI({
-  baseURL: "https://models.inference.ai.azure.com",
-  apiKey: process.env.LLM_API_KEY,
+const openai = new AzureOpenAI({
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT!,
+  apiKey: process.env.AZURE_OPENAI_API_KEY!,
+  apiVersion: process.env.AZURE_OPENAI_API_VERSION || "2024-12-01-preview",
 });
 
-const CHAT_API = "http://localhost:3000/api/chat";
+const CHAT_API = process.env.EVAL_CHAT_URL || "https://elasticchat.vercel.app/api/chat";
 
 interface TestCase {
   category: string;
@@ -111,7 +112,7 @@ async function judge(question: string, response: string): Promise<Scores> {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: process.env.LLM_MODEL_MINI || "gpt-4o-mini",
     messages: [
       {
         role: "system",
