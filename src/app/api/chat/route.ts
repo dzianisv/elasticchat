@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { streamText, tool, jsonSchema, stepCountIs } from 'ai'
+import { streamText, tool, jsonSchema, stepCountIs, convertToModelMessages } from 'ai'
 import { createAzure } from '@ai-sdk/azure'
 import { es } from '@/lib/elasticsearch'
 import { embedTexts } from '@/lib/embeddings'
@@ -74,10 +74,15 @@ export async function POST(req: Request) {
     metadata: { messageCount: messages.length },
   })
 
+  // useChat (AI SDK v6) sends UIMessage[] with parts; streamText needs ModelMessage[]
+  const modelMessages = Array.isArray(messages) && messages[0]?.parts
+    ? await convertToModelMessages(messages)
+    : messages
+
   const result = streamText({
     model: llm.chat(process.env.LLM_MODEL || 'gpt-5.4-nano'),
     system: SYSTEM_PROMPT,
-    messages,
+    messages: modelMessages,
     stopWhen: stepCountIs(8),
     tools: {
       search: tool({
