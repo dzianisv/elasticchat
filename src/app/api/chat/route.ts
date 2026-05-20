@@ -28,32 +28,30 @@ const llm = createAzure({
   useDeploymentBasedUrls: true,
 })
 
-const SYSTEM_PROMPT = `You are an NVIDIA blog assistant that answers questions using search results.
+const SYSTEM_PROMPT = `You are an NVIDIA blog assistant. Answer questions about NVIDIA (GPUs, AI, CUDA, products, announcements, partnerships) using the search tool to retrieve passages from the NVIDIA blog corpus.
 
-RULES:
-- ALWAYS search before answering. Never make claims without search results.
-- ALWAYS cite every factual claim with [1], [2], etc. matching the source index number.
-- At the END of your response, list all sources as:
+PROCESS
+1. For every user question about NVIDIA, call the search tool BEFORE answering.
+2. If the first search returns nothing useful, REFORMULATE the query (try synonyms, broader/narrower terms, or related product names) and search again. Try up to 3 different queries before giving up.
+3. For questions about "latest", "newest", "recent", "this year", or anything time-sensitive, set sort_by="date_desc".
+4. If you need the full text of a specific post you found, call get_full_post with its URL.
 
-Sources:
-[1] Title - URL
-[2] Title - URL
-
-- If search returns no results, say "I don't have information on that topic."
-- For "latest/newest/recent" queries, use sort_by: "date_desc".
-- Be concise and technical.
-- If the question is off-topic (not about NVIDIA), politely decline.`
+ANSWER FORMAT
+- Be concise and technical. 2-6 sentences for most questions.
+- Cite every factual claim with [N] markers matching the source index from search results.
+- ALWAYS end the answer with a "Sources:" section listing every cited [N] as: [N] Title - URL
+- If, after 2-3 reformulated searches, the corpus genuinely has no relevant content, say so plainly: "The NVIDIA blog archive I have access to doesn't cover that topic." Do not invent citations.
+- Never list a URL in Sources that didn't come from a search result.
+- If the question is not about NVIDIA at all, decline politely.`
 
 const INDEX = 'nvidia-blogs'
 
 const searchSchema = jsonSchema({
   type: 'object',
   properties: {
-    query: { type: 'string', description: 'Search query' },
-    sort_by: { type: 'string', enum: ['relevance', 'date_desc'], description: 'Sort order. Default relevance.' },
-    doc_type: { type: 'string', enum: ['blog_post', 'press_release', 'tutorial', 'announcement'], description: 'Filter by document type' },
-    tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tags (e.g. H100, CUDA)' },
-    limit: { type: 'number', description: 'Max results to return (default 5)' },
+    query: { type: 'string', description: 'Search query - keywords, product names, or natural language' },
+    sort_by: { type: 'string', enum: ['relevance', 'date_desc'], description: 'Use date_desc for time-sensitive queries (latest/newest/recent), relevance otherwise' },
+    limit: { type: 'number', description: 'Max results to return (default 5, max 10)' },
   },
   required: ['query', 'sort_by'],
   additionalProperties: false,
@@ -77,17 +75,14 @@ export async function POST(req: Request) {
   })
 
   // Query rewrite for multi-turn conversations
-  let rewrittenQuery: string | null = null
   if (messages.length > 2) {
     try {
       const recentMessages = messages.slice(-6)
-      const rewriteResult = await generateText({
+      await generateText({
         model: llm.chat(process.env.LLM_MODEL_MINI || 'gpt-5.4-nano'),
         system: "Rewrite the user's last message as a standalone search query using the conversation context. Output only the query, nothing else.",
         messages: recentMessages,
       })
-      rewrittenQuery = rewriteResult.text?.trim() || null
-      trace?.generation({ name: 'query-rewrite', output: rewrittenQuery })
     } catch {
       // Fall back to original query
     }
@@ -97,38 +92,44 @@ export async function POST(req: Request) {
     model: llm.chat(process.env.LLM_MODEL || 'gpt-5.4-nano'),
     system: SYSTEM_PROMPT,
     messages,
-    stopWhen: stepCountIs(5),
+    stopWhen: stepCountIs(8),
     tools: {
       search: tool({
         description:
-          'Search NVIDIA blog posts by relevance (hybrid semantic + text) or by date. Returns top 5 results.',
+          'Search the NVIDIA blog corpus. Returns up to 5 passages with title, URL, date, and content snippet. Use sort_by="date_desc" for time-sensitive queries.',
         inputSchema: searchSchema,
-        execute: async ({ query, sort_by, doc_type, tags, limit }: { query: string; sort_by: 'relevance' | 'date_desc'; doc_type?: string; tags?: string[]; limit?: number }) => {
-          const size = limit || 5
-          const filters: any[] = []
-          if (doc_type) filters.push({ term: { doc_type } })
-          if (tags && tags.length > 0) filters.push({ terms: { tags } })
+        execute: async ({ query, sort_by, limit }: { query: string; sort_by: 'relevance' | 'date_desc'; limit?: number }) => {
+          const size = Math.min(limit || 5, 10)
 
           if (sort_by === 'date_desc') {
-            const must: any = { multi_match: { query, fields: ['title^2', 'content'] } }
-            const searchQuery = filters.length > 0
-              ? { bool: { must, filter: filters } }
-              : must
             const resp = await es.search({
               index: INDEX,
               size,
-              query: searchQuery,
+              query: { multi_match: { query, fields: ['title^2', 'content'] } },
               sort: [{ date: { order: 'desc' } }],
-              _source: ['title', 'url', 'date', 'content', 'doc_type', 'tags'],
+              _source: ['title', 'url', 'date', 'content'],
+              collapse: { field: 'url' },
             })
             return formatHits(resp.hits.hits)
           }
 
-          // Hybrid search with RRF
-          const [embedding] = await embedTexts([query])
-          const standardQuery = filters.length > 0
-            ? { bool: { must: { multi_match: { query, fields: ['title^2', 'content'] } }, filter: filters } }
-            : { multi_match: { query, fields: ['title^2', 'content'] } }
+          // Hybrid search with RRF. Falls back to BM25 if embeddings unavailable.
+          let embedding: number[] | null = null
+          try {
+            ;[embedding] = await embedTexts([query], 0)
+          } catch {
+            embedding = null
+          }
+
+          if (!embedding) {
+            const resp = await es.search({
+              index: INDEX,
+              size,
+              query: { multi_match: { query, fields: ['title^2', 'content'] } },
+              _source: ['title', 'url', 'date', 'content'],
+            })
+            return formatHits(dedupeByUrl(resp.hits.hits, size))
+          }
 
           const resp = await es.search({
             index: INDEX,
@@ -138,7 +139,7 @@ export async function POST(req: Request) {
                 retrievers: [
                   {
                     standard: {
-                      query: standardQuery,
+                      query: { multi_match: { query, fields: ['title^2', 'content'] } },
                     },
                   },
                   {
@@ -147,34 +148,31 @@ export async function POST(req: Request) {
                       query_vector: embedding,
                       k: 20,
                       num_candidates: 100,
-                      ...(filters.length > 0 ? { filter: { bool: { filter: filters } } } : {}),
                     },
                   },
                 ],
               },
             },
-            _source: ['title', 'url', 'date', 'content', 'doc_type', 'tags'],
+            _source: ['title', 'url', 'date', 'content'],
           })
-          return formatHits(resp.hits.hits)
+          return formatHits(dedupeByUrl(resp.hits.hits, size))
         },
       }),
       get_full_post: tool({
-        description: 'Get the full content of a blog post by its URL.',
+        description: 'Get the full text of a blog post by URL. Use after search to read more detail.',
         inputSchema: getFullPostSchema,
         execute: async ({ url }: { url: string }) => {
           try {
             const resp = await es.search({
               index: INDEX,
               size: 100,
-              query: {
-                term: { parent_url: url },
-              },
-              sort: [{ _score: { order: 'desc' } }],
-              _source: ['title', 'url', 'date', 'content'],
+              query: { term: { url } },
+              sort: [{ chunk_index: { order: 'asc' } }],
+              _source: ['title', 'url', 'date', 'content', 'chunk_index'],
             })
             const hits = resp.hits.hits
             if (hits.length === 0) {
-              return { error: 'Post not found' }
+              return { error: 'Post not found in index' }
             }
             const first = hits[0]._source as Record<string, unknown>
             const content = hits
@@ -187,7 +185,7 @@ export async function POST(req: Request) {
               content,
             }
           } catch {
-            return { error: 'Post not found' }
+            return { error: 'Failed to fetch post' }
           }
         },
       }),
@@ -212,6 +210,19 @@ export async function POST(req: Request) {
   return result.toUIMessageStreamResponse()
 }
 
+function dedupeByUrl(hits: any[], max: number): any[] {
+  const seen = new Set<string>()
+  const out: any[] = []
+  for (const h of hits) {
+    const url = (h._source as Record<string, unknown>).url as string
+    if (seen.has(url)) continue
+    seen.add(url)
+    out.push(h)
+    if (out.length >= max) break
+  }
+  return out
+}
+
 function formatHits(hits: any[]) {
   return hits.map((hit, index) => {
     const src = hit._source as Record<string, unknown>
@@ -221,7 +232,7 @@ function formatHits(hits: any[]) {
       title: src.title,
       url: src.url,
       date: src.date,
-      content: content.slice(0, 500),
+      content: content.slice(0, 800),
     }
   })
 }
