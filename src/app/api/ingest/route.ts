@@ -230,7 +230,7 @@ async function getCrawlHash(url: string): Promise<string | null> {
 // Index a single post
 // ---------------------------------------------------------------------------
 
-async function indexPost(item: FeedItem): Promise<'indexed' | 'skipped' | 'unchanged'> {
+async function indexPost(item: FeedItem, skipEmbed = false): Promise<'indexed' | 'skipped' | 'unchanged'> {
   const { content, title: fetchedTitle } = await fetchContent(item.url)
   if (content.length < 100) return 'skipped'
 
@@ -244,23 +244,32 @@ async function indexPost(item: FeedItem): Promise<'indexed' | 'skipped' | 'uncha
   const chunks = chunkText(content)
   if (chunks.length === 0) return 'skipped'
 
-  const allEmbeddings: number[][] = []
-  for (let i = 0; i < chunks.length; i += 16) {
-    const batch = chunks.slice(i, i + 16)
-    allEmbeddings.push(...(await embedTexts(batch)))
-    if (i + 16 < chunks.length) await new Promise((r) => setTimeout(r, 4500))
-  }
-
   const title = item.title || fetchedTitle || item.url
   const date = item.date ? new Date(item.date).toISOString() : new Date().toISOString()
 
-  await es.bulk({
-    refresh: false,
-    operations: chunks.flatMap((chunk, i) => [
-      { index: { _index: NVIDIA_BLOGS_INDEX, _id: `${item.url}#${i}` } },
-      { url: item.url, title, date, content: chunk, chunk_index: i, source: item.source, embedding: allEmbeddings[i] },
-    ]),
-  })
+  if (skipEmbed) {
+    await es.bulk({
+      refresh: false,
+      operations: chunks.flatMap((chunk, i) => [
+        { index: { _index: NVIDIA_BLOGS_INDEX, _id: `${item.url}#${i}` } },
+        { url: item.url, title, date, content: chunk, chunk_index: i, source: item.source },
+      ]),
+    })
+  } else {
+    const allEmbeddings: number[][] = []
+    for (let i = 0; i < chunks.length; i += 16) {
+      const batch = chunks.slice(i, i + 16)
+      allEmbeddings.push(...(await embedTexts(batch)))
+      if (i + 16 < chunks.length) await new Promise((r) => setTimeout(r, 4500))
+    }
+    await es.bulk({
+      refresh: false,
+      operations: chunks.flatMap((chunk, i) => [
+        { index: { _index: NVIDIA_BLOGS_INDEX, _id: `${item.url}#${i}` } },
+        { url: item.url, title, date, content: chunk, chunk_index: i, source: item.source, embedding: allEmbeddings[i] },
+      ]),
+    })
+  }
 
   await es.index({
     index: CRAWL_STATE_INDEX,
@@ -281,11 +290,11 @@ async function indexPost(item: FeedItem): Promise<'indexed' | 'skipped' | 'uncha
 // Run ingestion over a list of items
 // ---------------------------------------------------------------------------
 
-async function runIngestion(items: FeedItem[], limit: number) {
+async function runIngestion(items: FeedItem[], limit: number, skipEmbed = false) {
   let indexed = 0, skipped = 0, unchanged = 0, errors = 0
   for (const item of items.slice(0, limit)) {
     try {
-      const result = await indexPost(item)
+      const result = await indexPost(item, skipEmbed)
       if (result === 'indexed') indexed++
       else if (result === 'unchanged') unchanged++
       else skipped++
@@ -293,7 +302,7 @@ async function runIngestion(items: FeedItem[], limit: number) {
       console.error(`Failed ${item.url}:`, (e as Error).message)
       errors++
     }
-    await new Promise((r) => setTimeout(r, 4500))
+    if (!skipEmbed) await new Promise((r) => setTimeout(r, 4500))
   }
   return { indexed, skipped, unchanged, errors }
 }
@@ -306,6 +315,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url)
   const source = url.searchParams.get('source') || 'rss'
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 500)
+  const skipEmbed = url.searchParams.get('skip_embed') === '1'
 
   try {
     await ensureIndices()
@@ -338,13 +348,14 @@ export async function GET(req: Request) {
       items = await fetchFromNvidiaBlogsRss()
     }
 
-    const stats = await runIngestion(items, limit)
+    const stats = await runIngestion(items, limit, skipEmbed)
 
     return NextResponse.json({
       success: true,
       source,
       requested: limit,
       fetched: items.length,
+      skip_embed: skipEmbed,
       ...stats,
       sources: ['rss', 'sitemap', 'developer', 'press', 'geforce', 'docs', 'all'],
     })
