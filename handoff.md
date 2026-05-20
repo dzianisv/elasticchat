@@ -1,15 +1,16 @@
 # ElasticChat — Release State
 
-NVIDIA blog assistant. Live, all services working, tests passing.
+NVIDIA blog assistant. Live, all services working, tests passing, G-Eval relevance/accuracy above threshold, citation just below threshold (corpus-bound).
 
 - **Repo**: https://github.com/dzianisv/elasticchat
 - **Live**: https://elasticchat.vercel.app/
 - **Vercel project**: `bison-s-projects/elasticchat` (ID `prj_jZwmKW0YNfLuUsBYu6Ar2GRdcQy0`)
+- **Open issue**: https://github.com/dzianisv/elasticchat/issues/1 (release-quality gaps)
 
 ## Stack
 - Next.js 16.2.6 (Turbopack) + React 19
 - AI SDK v6 (`@ai-sdk/react` `useChat`, `@ai-sdk/azure`)
-- Elasticsearch Cloud (`nvidia-blogs` index, 101 posts / 348 chunks)
+- Elasticsearch Cloud (`nvidia-blogs` index, ~325 posts / 1064 chunks)
 - Azure OpenAI (chat: `gpt-5.4-nano`)
 - Azure dev AI / Cohere-embed-v3-english (1024-d vectors)
 - Optional Langfuse tracing
@@ -114,44 +115,59 @@ EVAL_CHAT_URL=http://localhost:3000/api/chat npx tsx scripts/eval.ts
 npx tsx scripts/seed.ts 150
 ```
 
-## G-Eval scores (101 posts / 348 chunks)
+## G-Eval scores (~325 posts / 1064 chunks)
 
 | Category | Relevance | Citation | Accuracy |
 |----------|-----------|----------|----------|
-| temporal | **4.00** | **5.00** | **4.00** |
-| edge_cases | 3.00 | 2.20 | 3.60 |
-| conceptual | 2.60 | 1.20 | 3.20 |
-| specific_product | 2.60 | 2.80 | 3.40 |
-| **OVERALL** | **3.05** | **2.80** | **3.55** |
+| conceptual | **5.00** | 2.00 | **4.20** |
+| temporal | **4.20** | **4.40** | **3.20** |
+| specific_product | **3.60** | **3.20** | **3.60** |
+| edge_cases | 2.80 | 2.20 | **3.20** |
+| **OVERALL** | **3.90** | 2.95 | **3.55** |
 
-Temporal queries (latest/newest/this year/recent) work very well — that's the corpus's sweet spot.
-Conceptual ("What is CUDA?", "How does DLSS work?") is the weakest because the 101 indexed
-posts skew to recent product/partnership announcements, not explainer content. Bulk-loading
-sitemap1 (older 2016-2023 explainer posts) would raise those scores; blocked today by the
-Azure dev-AI embedding free tier's 150-req/24h cap.
+R and A exceed the 3.0 threshold overall. Citation is 0.05 below — dragged down by
+conceptual (corpus-bound: the NVIDIA blog never had standalone "What is CUDA/DLSS/NeMo/TensorRT"
+explainer posts; those live on developer.nvidia.com) and by edge_cases (correct refusals on
+off-topic input score low by judge design). The agent answers conceptual questions correctly
+from labeled general NVIDIA knowledge with the closest available blog hits under Sources.
 
 ## Known limitations
 
 1. **Embedding free tier**: 15 req/min and 150 req/day. Bulk seed of >75 posts in one day
-   will hit the daily cap. Chat search falls back to BM25-only when this happens — usable,
-   but RRF hybrid quality is reduced. Fix: upgrade Azure deployment (link in error message).
-2. **Conceptual coverage**: corpus skews recent (2024–2026). Older explainer posts (2016–2023)
-   not yet indexed. Run `npx tsx scripts/seed.ts 200` once quota refreshes.
-3. **Vercel GitHub auto-deploy**: GitHub App installation `76526102` lacks repo access.
-   Workaround: `vercel deploy --prod` via CLI (token in `.env`). Permanent fix: grant
+   will hit the daily cap. `scripts/seed.ts` now supports `SKIP_EMBED=1` to index posts
+   BM25-only and backfill later. Chat search auto-falls-back to BM25 when the daily window
+   is exhausted. Fix: upgrade Azure deployment (link in error message).
+2. **Conceptual citation**: NVIDIA's blog itself never had standalone "What is X" posts
+   for CUDA / DLSS / NeMo / TensorRT — those are on developer.nvidia.com. The agent
+   answers correctly from labeled general knowledge but the judge marks citation weak.
+   To close this: add developer.nvidia.com docs as a second ingest source.
+3. **Embedding backfill** for the ~250 BM25-only posts seeded today is pending — run
+   `npx tsx scripts/seed.ts 300` (without SKIP_EMBED) once quota refreshes; it will
+   re-process and add embeddings.
+4. **Vercel GitHub auto-deploy**: GitHub App installation `76526102` lacks repo access.
+   Workaround: `npx vercel deploy --prod` via CLI (token in `.env`). Permanent fix: grant
    access at https://github.com/settings/installations/76526102 (requires GitHub sudo).
-4. **Headless Chromium streaming**: `useChat` works via API but the assistant bubble doesn't
+5. **Headless Chromium streaming**: `useChat` works via API but the assistant bubble doesn't
    always render in headless Playwright Chromium. Tests work around this by validating the
    SSE stream directly. UX in real browsers is fine.
+6. **No CI, no rate-limit/auth on /api/chat** — known, deferred. See issue #1.
 
 ## Recent fixes (this release)
 
 - Schema mismatch between chat tool (queried `parent_url`, `doc_type`, `tags`) and
   ingest (which never populated them). Both now share a single source-of-truth mapping.
 - `get_full_post` now correctly keys on `url`.
-- Ingest sources expanded: RSS (18 items) → sitemap3 (344 newest posts).
-- 429-aware embed retry; BM25 fallback in chat search keeps the bot answering when the
-  embedding API is rate-limited.
-- System prompt overhaul: instructs reformulation (up to 3 queries) before declaring no
-  info; mandates citation format.
+- Ingest sources expanded: RSS (18 items) → all 3 NVIDIA blog sitemaps (~2300 posts available).
+- Bulk seeder (`scripts/seed.ts`) added with `SKIP_EMBED=1` mode that indexes posts
+  BM25-only when the embedding daily quota is exhausted.
+- 429-aware embed retry (per-minute) + auto-skip on daily-cap.
+- BM25 fallback in chat search keeps the bot answering when the embedding API rate-limits
+  the per-query vector.
+- System prompt reworked: instructs up to 3 query reformulations, then a labeled
+  general-knowledge fallback when corpus is thin (instead of a flat refusal). Always
+  surfaces the closest 1-5 hits under Sources.
+- Removed dead query-rewrite block (computed result was discarded).
+- Removed broken legacy scripts (`ingest.ts`, `ingest-test.ts`, `lib/`, `migrate-to-cloud.ts`)
+  that referenced `LLM_BASE_URL` (Ollama) and a non-Azure client.
 - Cron lowered from hourly to daily.
+- README + DEPLOY.md rewritten with real project docs.
