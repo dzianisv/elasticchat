@@ -10,6 +10,7 @@ import {
 import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
 import { Thread } from '@/components/assistant-ui/thread'
 import { SiteFooter } from '@/components/site-footer'
+import { APP_NAME } from '@/lib/appConfig'
 
 function ReplayFromQueryParam() {
   const runtime = useAssistantRuntime()
@@ -54,7 +55,7 @@ function HomeShell() {
             <span className="text-black font-bold">N</span>
           </div>
           <div className="flex-1">
-            <h1 className="text-lg font-semibold leading-tight">NVIDIA Blog Assistant</h1>
+            <h1 className="text-lg font-semibold leading-tight">{APP_NAME}</h1>
             <p className="text-xs text-muted-foreground">
               Ask about GPUs, AI platforms, products, and recent announcements
             </p>

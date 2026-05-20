@@ -26,6 +26,7 @@ export const crawlStateMapping = {
       content_hash: { type: 'keyword' as const },
       last_crawled: { type: 'date' as const },
       status: { type: 'keyword' as const },
+      source: { type: 'keyword' as const },
     },
   },
 }

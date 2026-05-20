@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { SiteFooter } from '@/components/site-footer'
 import { es } from '@/lib/elasticsearch'
 import { NVIDIA_BLOGS_INDEX, CRAWL_STATE_INDEX } from '@/lib/indexMappings'
+import { APP_NAME } from '@/lib/appConfig'
 
 // Always render against fresh ES state — never cache this page.
 export const dynamic = 'force-dynamic'
@@ -12,12 +13,23 @@ interface CrawlEntry {
   content_hash?: string
   last_crawled?: string
   status?: string
+  source?: string
 }
 
 interface BlogTitleMeta {
   title?: string
   date?: string
 }
+
+// All sources the ingest route knows about, in display order.
+const ALL_SOURCES = [
+  { key: 'rss', label: 'blogs.nvidia.com (RSS)', param: 'rss' },
+  { key: 'sitemap', label: 'blogs.nvidia.com (sitemap)', param: 'sitemap' },
+  { key: 'developer', label: 'developer.nvidia.com', param: 'developer' },
+  { key: 'press', label: 'nvidianews.nvidia.com', param: 'press' },
+  { key: 'geforce', label: 'nvidia.com/geforce', param: 'geforce' },
+  { key: 'docs', label: 'docs.nvidia.com', param: 'docs' },
+]
 
 interface DashboardData {
   ok: boolean
@@ -27,17 +39,21 @@ interface DashboardData {
   entries: Array<CrawlEntry & { title?: string; date?: string; source: string }>
   runs: Array<{ day: string; count: number; last: string }>
   lastRun: string | null
+  /** Count of crawl-state docs per source label */
+  sourceCounts: Record<string, number>
 }
 
-function inferSource(url: string): string {
-  // The pipeline pulls from either the RSS feed or one of the three sitemaps.
-  // We can't read that decision from the crawl-state document directly (no
-  // `source` field is persisted), so we approximate from the URL shape.
-  if (!url) return 'unknown'
-  if (url.includes('/blog/')) return 'blogs.nvidia.com/blog'
-  if (url.includes('blogs.nvidia.com')) return 'blogs.nvidia.com (RSS/sitemap)'
+function resolveSource(entry: CrawlEntry): string {
+  // Prefer the `source` field stored in crawl-state by the ingest route.
+  if (entry.source) return entry.source
+  // Fall back to URL heuristic for docs indexed before the field was added.
+  const url = entry.url ?? ''
+  if (url.includes('blogs.nvidia.com')) return 'blogs.nvidia.com'
   if (url.includes('developer.nvidia.com')) return 'developer.nvidia.com'
-  return 'other'
+  if (url.includes('nvidianews.nvidia.com')) return 'nvidianews.nvidia.com'
+  if (url.includes('nvidia.com/geforce')) return 'nvidia.com/geforce'
+  if (url.includes('docs.nvidia.com')) return 'docs.nvidia.com'
+  return 'unknown'
 }
 
 async function fetchDashboardData(): Promise<DashboardData> {
@@ -48,6 +64,7 @@ async function fetchDashboardData(): Promise<DashboardData> {
     entries: [],
     runs: [],
     lastRun: null,
+    sourceCounts: {},
   }
 
   try {
@@ -114,16 +131,25 @@ async function fetchDashboardData(): Promise<DashboardData> {
         content_hash: src.content_hash,
         last_crawled: src.last_crawled,
         status: src.status,
+        source: src.source,
         title: meta?.title,
         date: meta?.date,
-        source: inferSource(src.url ?? ''),
+        // resolveSource is called below after the map so entries have the raw field
       }
+    })
+
+    // Build source counts from the actual `source` field (with URL fallback).
+    const sourceCounts: Record<string, number> = {}
+    const resolvedEntries = entries.map((e) => {
+      const source = resolveSource(e)
+      sourceCounts[source] = (sourceCounts[source] ?? 0) + 1
+      return { ...e, source }
     })
 
     // 5. Group by UTC day for a "runs" overview. The pipeline runs once
     // nightly so day-grouping is a reasonable proxy for "run".
     const byDay = new Map<string, { count: number; last: string }>()
-    for (const e of entries) {
+    for (const e of resolvedEntries) {
       if (!e.last_crawled) continue
       const day = e.last_crawled.slice(0, 10)
       const cur = byDay.get(day)
@@ -137,9 +163,9 @@ async function fetchDashboardData(): Promise<DashboardData> {
       .map(([day, v]) => ({ day, ...v }))
       .sort((a, b) => (a.day < b.day ? 1 : -1))
 
-    const lastRun = entries[0]?.last_crawled ?? null
+    const lastRun = resolvedEntries[0]?.last_crawled ?? null
 
-    return { ...empty, total, uniqueUrls, entries, runs, lastRun }
+    return { ...empty, total, uniqueUrls, entries: resolvedEntries, runs, lastRun, sourceCounts }
   } catch (e) {
     return {
       ...empty,
@@ -178,7 +204,7 @@ export default async function IngestionDashboardPage() {
             <span className="text-black font-bold">N</span>
           </div>
           <div>
-            <h1 className="text-lg font-semibold leading-tight">NVIDIA Blog Assistant</h1>
+            <h1 className="text-lg font-semibold leading-tight">{APP_NAME}</h1>
             <p className="text-xs text-muted-foreground">Ingestion dashboard</p>
           </div>
         </Link>
@@ -232,35 +258,52 @@ export default async function IngestionDashboardPage() {
           />
         </section>
 
-        {data.runs.length > 0 && (
-          <section>
-            <h3 className="text-lg font-semibold mb-3">Recent runs (grouped by day)</h3>
-            <div className="overflow-x-auto rounded-lg border border-border">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/40 text-left">
-                  <tr>
-                    <th className="px-4 py-2 font-medium">Day (UTC)</th>
-                    <th className="px-4 py-2 font-medium">Latest timestamp</th>
-                    <th className="px-4 py-2 font-medium text-right">Articles touched</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.runs.map((r) => (
-                    <tr key={r.day} className="border-t border-border">
-                      <td className="px-4 py-2 font-mono">{r.day}</td>
-                      <td className="px-4 py-2 font-mono text-muted-foreground">
-                        {formatDateTime(r.last)}
+        <section>
+          <h3 className="text-lg font-semibold mb-3">Source breakdown</h3>
+          <p className="text-xs text-muted-foreground mb-3">
+            The nightly cron only calls <code className="text-[#9bd02a]">/api/ingest</code> (= <code className="text-[#9bd02a]">source=rss</code>).
+            To crawl other sources, trigger them manually:{' '}
+            <code className="text-[#9bd02a]">curl &quot;/api/ingest?source=developer&amp;limit=20&quot;</code>.
+            Available values: <code className="text-[#9bd02a]">rss</code>,{' '}
+            <code className="text-[#9bd02a]">sitemap</code>,{' '}
+            <code className="text-[#9bd02a]">developer</code>,{' '}
+            <code className="text-[#9bd02a]">press</code>,{' '}
+            <code className="text-[#9bd02a]">geforce</code>,{' '}
+            <code className="text-[#9bd02a]">docs</code>,{' '}
+            <code className="text-[#9bd02a]">all</code>.
+          </p>
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/40 text-left">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Source</th>
+                  <th className="px-4 py-2 font-medium text-right">URLs in crawl-state</th>
+                  <th className="px-4 py-2 font-medium">Trigger command</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ALL_SOURCES.map((s) => {
+                  const count = data.sourceCounts[s.label] ?? 0
+                  return (
+                    <tr key={s.key} className="border-t border-border">
+                      <td className="px-4 py-2 font-mono">{s.label}</td>
+                      <td className="px-4 py-2 text-right font-semibold">
+                        {count === 0 ? (
+                          <span className="text-muted-foreground">0 — never crawled</span>
+                        ) : (
+                          <span className="text-[#9bd02a]">{count}</span>
+                        )}
                       </td>
-                      <td className="px-4 py-2 text-right font-semibold text-[#9bd02a]">
-                        {r.count}
+                      <td className="px-4 py-2 text-xs text-muted-foreground font-mono">
+                        curl &quot;/api/ingest?source={s.param}&amp;limit=20&quot;
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
 
         <section>
           <h3 className="text-lg font-semibold mb-3">

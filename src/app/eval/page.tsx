@@ -3,6 +3,7 @@ import { readFileSync } from "fs";
 import { SiteFooter } from "@/components/site-footer";
 import { resolve } from "path";
 import evalReport from "../../../eval-report.json";
+import { APP_NAME } from "@/lib/appConfig";
 
 type Scores = {
   relevance: number;
@@ -135,7 +136,7 @@ function scoreClass(n: number): string {
 }
 
 export const metadata = {
-  title: "G-Eval results · NVIDIA Blog Assistant",
+  title: `G-Eval results · ${APP_NAME}`,
 };
 
 export default function EvalPage() {

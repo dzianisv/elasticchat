@@ -82,9 +82,13 @@ npx playwright test tests/e2e.spec.ts
 # Tool-call UI: clickable source links + foldable tool calls
 BASE_URL=https://elasticchat.vercel.app npx playwright test tests/debug-ui.spec.ts
 
-# G-Eval (20 fixed cases, ~3 min, writes eval-report.json)
+# G-Eval (23 fixed cases, ~3 min, writes eval-report.json)
 EVAL_CHAT_URL=https://elasticchat.vercel.app/api/chat npx tsx scripts/eval.ts
 ```
+
+The G-Eval suite covers four categories: **conceptual** (5 cases), **temporal** (6), **specific_product** (5), and **edge_cases** (7 — includes typo input, a Japanese-language query, and a long multi-constraint technical question about A100 vs H100 for medical image segmentation).
+
+Each run records `latency_ms` per case and computes **p50 / p95 latency** across all 23 responses. These are appended to `eval-history.csv` as two new columns (`latency_p50_ms`, `latency_p95_ms`) and included in `eval-report.json`. A **regression gate** fires after each run: if any score dimension (relevance, citation, or accuracy) drops more than 0.5 points vs the previous CSV row, the script exits with code 1.
 
 `npm run build` succeeding is **not** "done". The only completion check that counts is a Playwright run that shows a non-empty assistant bubble in the live DOM. See [`AGENTS.md`](./AGENTS.md).
 
@@ -116,9 +120,10 @@ Vercel Cron ─▶ GET /api/ingest?source=rss (default)
 | `developer` | RSS (Atom) | `developer.nvidia.com/blog/feed/` | ✓ 200 OK |
 | `press` | RSS 2.0 | `nvidianews.nvidia.com/rss` | ✓ 200 OK |
 | `geforce` | HTML scrape | `nvidia.com/en-us/geforce/news/` | links extracted, no RSS exists |
-| `all` | all four above in parallel | `limit/4` per source | |
+| `docs` | HTML scrape | `docs.nvidia.com/` | hub homepage → sub-doc links |
+| `all` | all five above in parallel | `limit/5` per source | |
 
-All sources use **Mozilla Readability** (`@mozilla/readability` + `jsdom`) for content extraction — same algorithm Firefox uses for Reader Mode. This replaces hand-coded CSS selectors and works reliably across all four domains without knowing their internal class names.
+All sources use **Mozilla Readability** (`@mozilla/readability` + `jsdom`) for content extraction — same algorithm Firefox uses for Reader Mode. This replaces hand-coded CSS selectors and works reliably across all five domains without knowing their internal class names.
 
 Schedule and trigger (`vercel.json`):
 
@@ -136,8 +141,11 @@ curl 'https://elasticchat.vercel.app/api/ingest?source=developer&limit=20'
 # Press releases from nvidianews.nvidia.com
 curl 'https://elasticchat.vercel.app/api/ingest?source=press&limit=20'
 
-# All sources, 5 posts each
-curl 'https://elasticchat.vercel.app/api/ingest?source=all&limit=20'
+# Documentation pages from docs.nvidia.com (hub scrape)
+curl 'https://elasticchat.vercel.app/api/ingest?source=docs&limit=20'
+
+# All sources, 5 posts each (rss, developer, press, geforce, docs)
+curl 'https://elasticchat.vercel.app/api/ingest?source=all&limit=25'
 
 # Bulk historical backfill from blogs.nvidia.com sitemap
 curl 'https://elasticchat.vercel.app/api/ingest?source=sitemap&limit=200'
@@ -156,7 +164,7 @@ Both indices are managed by `ensureIndices()` in the ingest route — no manual 
 | `nvidia-blogs` | One doc per chunk. Hybrid search target. | `url` kw, `title` text, `date` date, `content` text, `chunk_index` int, `source` kw, `embedding` dense_vector(1024, cosine) |
 | `crawl-state` | One doc per source URL. Idempotency store. | `url`, `content_hash`, `last_crawled`, `status`, `source` |
 
-The `source` field on every document records which feed/site supplied the content (`blogs.nvidia.com`, `developer.nvidia.com`, `nvidianews.nvidia.com`, `nvidia.com/geforce`), enabling per-source filtering in search queries.
+The `source` field on every document records which feed/site supplied the content (`blogs.nvidia.com`, `developer.nvidia.com`, `nvidianews.nvidia.com`, `nvidia.com/geforce`, `docs.nvidia.com`), enabling per-source filtering in search queries.
 
 ### Bulk loading
 
@@ -175,8 +183,9 @@ SKIP_EMBED=1 npx tsx scripts/seed.ts 200   # BM25-only when daily embed cap is e
 | `src/app/eval/page.tsx` | G-Eval results page — reads `eval-history.csv` (latest run metadata + scores) and `eval-report.json` (per-case detail). |
 | `src/app/ingest/page.tsx` | Ingestion dashboard — queries ES `crawl-state` live, shows last-crawled articles grouped by day. |
 | `src/app/api/chat/route.ts` | Streaming chat endpoint with `search` + `get_full_post` tools. |
-| `src/app/api/ingest/route.ts` | Cron-driven incremental ingest. Supports `?source=rss|sitemap|developer|press|geforce|all`. |
+| `src/app/api/ingest/route.ts` | Cron-driven incremental ingest. Supports `?source=rss|sitemap|developer|press|geforce|docs|all`. |
 | `src/components/assistant-ui/*` | Thread, ToolFallback, MarkdownText — reused, not hand-rolled. |
+| `src/lib/appConfig.ts` | Exports `APP_NAME = "NVIDIA Assistant"` — single source of truth for the application name used across UI, metadata, and system prompt. |
 | `src/lib/elasticsearch.ts` | Lazy ES client. |
 | `src/lib/embeddings.ts` | Cohere embeddings with 429 retry + daily-cap detection. |
 | `src/lib/indexMappings.ts` | ES index mappings. |

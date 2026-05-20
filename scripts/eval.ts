@@ -51,6 +51,9 @@ const testCases: TestCase[] = [
   { category: "edge_cases", question: "latest" },
   { category: "edge_cases", question: "H100" },
   { category: "edge_cases", question: "" },
+  { category: "edge_cases", question: "nvidea tensor cores explaned" },
+  { category: "edge_cases", question: "最新のNVIDIA GPUは何ですか？" },
+  { category: "edge_cases", question: "I'm building a deep learning pipeline for medical image segmentation using 3D U-Net. I need to understand trade-offs between A100 vs H100 for training — memory bandwidth, NVLink topology, and MIG partitioning for multi-tenant inference." },
 ];
 
 interface Scores {
@@ -65,6 +68,7 @@ interface Result {
   question: string;
   response: string;
   scores: Scores;
+  latency_ms: number;
 }
 
 async function streamChat(question: string): Promise<string> {
@@ -158,11 +162,13 @@ async function main() {
     const label = tc.question || "(empty string)";
     process.stdout.write(`[${i + 1}/${testCases.length}] ${label}...`);
 
+    const t0 = Date.now();
     const response = await streamChat(tc.question);
+    const latency_ms = Date.now() - t0;
     const scores = await judge(tc.question || "(empty input)", response);
 
-    results.push({ category: tc.category, question: tc.question, response, scores });
-    console.log(` R:${scores.relevance} C:${scores.citation} A:${scores.accuracy}`);
+    results.push({ category: tc.category, question: tc.question, response, scores, latency_ms });
+    console.log(` R:${scores.relevance} C:${scores.citation} A:${scores.accuracy} ${latency_ms}ms`);
     await sleep(4500); // avoid rate limit (15 req/min)
   }
 
@@ -186,12 +192,18 @@ async function main() {
   let commit = "";
   try { commit = execSync("git rev-parse --short HEAD").toString().trim(); } catch {}
 
+  const latencies = [...results.map(r => r.latency_ms)].sort((a, b) => a - b);
+  const p50 = latencies[Math.floor(latencies.length * 0.5)];
+  const p95 = latencies[Math.floor(latencies.length * 0.95)];
+
   const report = {
     results,
     categoryAverages,
     timestamp,
     commit,
     models: { chat: chatModel, judge: judgeModel, promptAuthor: promptAuthorModel },
+    latency_p50_ms: p50,
+    latency_p95_ms: p95,
   };
   writeFileSync("eval-report.json", JSON.stringify(report, null, 2));
 
@@ -206,7 +218,38 @@ async function main() {
     citation: avg(results.map((r) => r.scores.citation)),
     accuracy: avg(results.map((r) => r.scores.accuracy)),
     categoryAverages,
+    latency_p50_ms: p50,
+    latency_p95_ms: p95,
   });
+
+  // Regression gate
+  if (existsSync(HISTORY_PATH)) {
+    const rows = readFileSync(HISTORY_PATH, 'utf-8')
+      .split('\n')
+      .filter(l => l.trim() && !l.startsWith('"timestamp"'))
+      .map(l => {
+        const fields = l.match(/"(?:[^"]|"")*"/g) || []
+        return {
+          relevance: parseFloat(fields[6]?.replace(/"/g, '') || '0'),
+          citation:  parseFloat(fields[7]?.replace(/"/g, '') || '0'),
+          accuracy:  parseFloat(fields[8]?.replace(/"/g, '') || '0'),
+        }
+      })
+    if (rows.length >= 2) {
+      const prev = rows[rows.length - 2]
+      const curr = rows[rows.length - 1]
+      const THRESHOLD = 0.5
+      let regressed = false
+      for (const dim of ['relevance', 'citation', 'accuracy'] as const) {
+        const drop = prev[dim] - curr[dim]
+        if (drop > THRESHOLD) {
+          console.error(`\n⚠ REGRESSION: ${dim} dropped ${drop.toFixed(2)} points (${prev[dim].toFixed(2)} → ${curr[dim].toFixed(2)})`)
+          regressed = true
+        }
+      }
+      if (regressed) process.exit(1)
+    }
+  }
 
   // Print summary
   console.log("\n" + "=".repeat(60));
@@ -228,6 +271,7 @@ async function main() {
       padR(avg(allScores.map((s) => s.citation)).toFixed(2), 12) +
       padR(avg(allScores.map((s) => s.accuracy)).toFixed(2), 12)
   );
+  console.log(`\nLatency  p50: ${p50}ms  p95: ${p95}ms`);
   console.log("\nResults saved to eval-report.json");
 }
 
@@ -242,7 +286,7 @@ function padR(s: string, n: number): string {
 
 const HISTORY_PATH = "eval-history.csv";
 const HISTORY_HEADER =
-  "timestamp,commit,chat_model,prompt_author_model,judge_model,n_cases,relevance,citation,accuracy,category_averages\n";
+  "timestamp,commit,chat_model,prompt_author_model,judge_model,n_cases,relevance,citation,accuracy,category_averages,latency_p50_ms,latency_p95_ms\n";
 
 function csvCell(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
@@ -259,6 +303,8 @@ function appendHistoryRow(row: {
   citation: number;
   accuracy: number;
   categoryAverages: Record<string, { relevance: number; citation: number; accuracy: number }>;
+  latency_p50_ms: number;
+  latency_p95_ms: number;
 }) {
   if (!existsSync(HISTORY_PATH)) writeFileSync(HISTORY_PATH, HISTORY_HEADER);
   const cells = [
@@ -272,6 +318,8 @@ function appendHistoryRow(row: {
     row.citation.toFixed(4),
     row.accuracy.toFixed(4),
     JSON.stringify(row.categoryAverages),
+    String(Math.round(row.latency_p50_ms)),
+    String(Math.round(row.latency_p95_ms)),
   ].map(csvCell);
   appendFileSync(HISTORY_PATH, cells.join(",") + "\n");
   console.log(`Appended run to ${HISTORY_PATH}`);
