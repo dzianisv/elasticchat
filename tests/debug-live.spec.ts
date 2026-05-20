@@ -32,7 +32,7 @@ test('debug: real user flow on live site', async ({ page }) => {
   await input.fill('When recent nvidia gpu were released?');
   await page.screenshot({ path: 'test-results/02-typed.png', fullPage: true });
 
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.keyboard.press('Enter');
 
   // Wait for streaming to finish — give it up to 60s
   // The "Thinking..." indicator only shows while status is streaming/submitted
@@ -49,7 +49,7 @@ test('debug: real user flow on live site', async ({ page }) => {
   await page.screenshot({ path: 'test-results/03-after-send.png', fullPage: true });
 
   const allText = await page.evaluate(() => document.body.innerText);
-  const assistantBubbles = await page.locator('.justify-start .rounded-lg').allInnerTexts();
+  const assistantBubbles = await page.locator('.justify-start > div').allInnerTexts();
 
   console.log('=== ALL VISIBLE TEXT ===');
   console.log(allText);
