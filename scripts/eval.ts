@@ -1,6 +1,6 @@
 import "dotenv/config";
-import { readFileSync } from "fs";
-import { writeFileSync } from "fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
+import { execSync } from "child_process";
 import { resolve } from "path";
 import { AzureOpenAI } from "openai";
 
@@ -113,7 +113,7 @@ async function judge(question: string, response: string): Promise<Scores> {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const completion = await openai.chat.completions.create({
-    model: process.env.LLM_MODEL_MINI || "gpt-4o-mini",
+    model: process.env.LLM_MODEL_MINI || "gpt-5",
     messages: [
       {
         role: "system",
@@ -125,7 +125,6 @@ async function judge(question: string, response: string): Promise<Scores> {
         content: `Question: ${question}\nResponse: ${response}`,
       },
     ],
-    temperature: 0,
   });
 
       const content = completion.choices[0]?.message?.content || "{}";
@@ -180,8 +179,34 @@ async function main() {
     };
   }
 
-  const report = { results, categoryAverages, timestamp: new Date().toISOString() };
+  const timestamp = new Date().toISOString();
+  const chatModel = process.env.LLM_MODEL || "gpt-5.4-nano";
+  const judgeModel = process.env.LLM_MODEL_MINI || chatModel;
+  const promptAuthorModel = process.env.PROMPT_AUTHOR_MODEL || "claude-opus-4-7";
+  let commit = "";
+  try { commit = execSync("git rev-parse --short HEAD").toString().trim(); } catch {}
+
+  const report = {
+    results,
+    categoryAverages,
+    timestamp,
+    commit,
+    models: { chat: chatModel, judge: judgeModel, promptAuthor: promptAuthorModel },
+  };
   writeFileSync("eval-report.json", JSON.stringify(report, null, 2));
+
+  appendHistoryRow({
+    timestamp,
+    commit,
+    chatModel,
+    promptAuthorModel,
+    judgeModel,
+    nCases: results.length,
+    relevance: avg(results.map((r) => r.scores.relevance)),
+    citation: avg(results.map((r) => r.scores.citation)),
+    accuracy: avg(results.map((r) => r.scores.accuracy)),
+    categoryAverages,
+  });
 
   // Print summary
   console.log("\n" + "=".repeat(60));
@@ -213,6 +238,43 @@ function avg(nums: number[]): number {
 
 function padR(s: string, n: number): string {
   return s.padEnd(n);
+}
+
+const HISTORY_PATH = "eval-history.csv";
+const HISTORY_HEADER =
+  "timestamp,commit,chat_model,prompt_author_model,judge_model,n_cases,relevance,citation,accuracy,category_averages\n";
+
+function csvCell(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function appendHistoryRow(row: {
+  timestamp: string;
+  commit: string;
+  chatModel: string;
+  promptAuthorModel: string;
+  judgeModel: string;
+  nCases: number;
+  relevance: number;
+  citation: number;
+  accuracy: number;
+  categoryAverages: Record<string, { relevance: number; citation: number; accuracy: number }>;
+}) {
+  if (!existsSync(HISTORY_PATH)) writeFileSync(HISTORY_PATH, HISTORY_HEADER);
+  const cells = [
+    row.timestamp,
+    row.commit,
+    row.chatModel,
+    row.promptAuthorModel,
+    row.judgeModel,
+    String(row.nCases),
+    row.relevance.toFixed(4),
+    row.citation.toFixed(4),
+    row.accuracy.toFixed(4),
+    JSON.stringify(row.categoryAverages),
+  ].map(csvCell);
+  appendFileSync(HISTORY_PATH, cells.join(",") + "\n");
+  console.log(`Appended run to ${HISTORY_PATH}`);
 }
 
 main().catch((e) => {

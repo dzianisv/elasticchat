@@ -1,8 +1,8 @@
 # ElasticChat
 
-> A RAG chatbot that answers questions about NVIDIA by citing posts from the [NVIDIA Blog](https://blogs.nvidia.com).
+> A RAG chatbot that answers questions about NVIDIA by citing posts from the NVIDIA blog corpus (blogs.nvidia.com, developer.nvidia.com, nvidianews.nvidia.com, and more).
 
-**Live:** [elasticchat.vercel.app](https://elasticchat.vercel.app/) · **G-Eval:** [elasticchat.vercel.app/eval](https://elasticchat.vercel.app/eval) · **Issues:** [#1](https://github.com/dzianisv/elasticchat/issues/1)
+**Live:** [elasticchat.vercel.app](https://elasticchat.vercel.app/) · **G-Eval:** [elasticchat.vercel.app/eval](https://elasticchat.vercel.app/eval) · **Ingestion:** [elasticchat.vercel.app/ingest](https://elasticchat.vercel.app/ingest) · **Issues:** [#1](https://github.com/dzianisv/elasticchat/issues/1)
 
 ## TL;DR
 
@@ -34,7 +34,7 @@ Vercel cron (daily 02:00 UTC) ─▶ GET /api/ingest → RSS → chunk → embed
 - **AI SDK v6** — `streamText`, `convertToModelMessages`, `tool`, `stepCountIs`
 - **Elasticsearch 8** — `dense_vector(1024, cosine)` + BM25, combined via `retriever.rrf`
 - **Vercel** — hosts the Next.js app, the chat API, and the ingest cron (all in one project)
-- *(optional)* **Langfuse** — tracing
+- *(optional)* **Langfuse** (`cloud.langfuse.com`) — LLM observability: traces every `/api/chat` request with token usage (prompt + completion tokens). Enable by setting `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASEURL` in env.
 
 See [`design.md`](./design.md) for the full architectural contract, file responsibilities, ES schema, and definition of "done".
 
@@ -44,9 +44,9 @@ See [`design.md`](./design.md) for the full architectural contract, file respons
 |---|---|---|---|
 | Chat / tool-calling LLM | `gpt-5.4-nano` (env: `LLM_MODEL`) | Azure OpenAI (`@ai-sdk/azure` `createAzure` → `useDeploymentBasedUrls`) | `src/app/api/chat/route.ts` |
 | Embeddings | `Cohere-embed-v3-english`, 1024-d | Azure dev AI (free tier: **15 req/min, 150 req/day**) | `src/lib/embeddings.ts` |
-| G-Eval judge | `gpt-4o-mini` by default (env: `LLM_MODEL_MINI`) | Azure OpenAI | `scripts/eval.ts` |
+| G-Eval judge | `gpt-5` (env: `LLM_MODEL_MINI`) | Azure OpenAI | `scripts/eval.ts` |
 
-Knobs (override via env): `AZURE_OPENAI_RESOURCE_NAME`, `AZURE_OPENAI_API_VERSION` (default `2025-01-01-preview`), `LLM_MODEL`, `LLM_MODEL_MINI`. The embedding endpoint is `${AZURE_DEV_AI_BASE_URL}/embeddings` with the `api-key` header.
+Knobs (override via env): `AZURE_OPENAI_RESOURCE_NAME`, `AZURE_OPENAI_API_VERSION` (default `2025-01-01-preview`), `LLM_MODEL`, `LLM_MODEL_MINI`, `PROMPT_AUTHOR_MODEL` (recorded in eval history, default `claude-opus-4-7`). The embedding endpoint is `${AZURE_DEV_AI_BASE_URL}/embeddings` with the `api-key` header.
 
 When the daily embedding cap is exhausted, the chat endpoint (`src/app/api/chat/route.ts`) catches the 429 and falls back to BM25-only retrieval automatically — no human action needed. The ingest pipeline has the same retry-then-cap behavior in `src/lib/embeddings.ts`.
 
@@ -93,18 +93,32 @@ EVAL_CHAT_URL=https://elasticchat.vercel.app/api/chat npx tsx scripts/eval.ts
 The ingest pipeline is a regular Next.js App-Router route, **not** a separate worker — Vercel hosts it as a serverless function and a Vercel Cron triggers it on schedule.
 
 ```
-Vercel Cron ─▶ GET /api/ingest (App Router, maxDuration=300s)
-                ├── ensureIndices()    create `nvidia-blogs` + `crawl-state` if missing
-                ├── fetchFromRSS()     last ~18 posts from blogs.nvidia.com/feed/
-                │   (or fetchFromSitemap when ?source=sitemap&limit=N)
-                ├── for each post:
-                │   ├── fetchContent() cheerio-strip nav/footer/share/scripts
-                │   ├── sha256(body) → skip if hash matches crawl-state (idempotent)
-                │   ├── chunkText()   2000c chunks, 200c overlap
-                │   ├── embedTexts()  16-chunk batches, 4.5s pacing (≤15 req/min)
-                │   └── es.bulk()     upsert all chunks for the URL
-                └── update crawl-state with new hash + last_crawled
+Vercel Cron ─▶ GET /api/ingest?source=rss (default)
+                ├── ensureIndices()     create `nvidia-blogs` + `crawl-state` if missing
+                ├── discover URLs       RSS feed or HTML listing (source-specific, see below)
+                ├── for each URL:
+                │   ├── fetchContent()  Mozilla Readability (Firefox Reader Mode algorithm)
+                │   │                   → strips nav/ads/footer automatically, no CSS selectors
+                │   │                   → falls back to cheerio if Readability throws
+                │   ├── sha256(body)    skip if hash matches crawl-state (idempotent)
+                │   ├── chunkText()     2000-char chunks, 200-char overlap
+                │   ├── embedTexts()    16-chunk batches, 4.5s pacing (≤15 req/min cap)
+                │   └── es.bulk()       upsert all chunks + store `source` label
+                └── update crawl-state  url, content_hash, last_crawled, status, source
 ```
+
+### Sources
+
+| `?source=` | Discovery | URL | Confirmed |
+|---|---|---|---|
+| `rss` *(default, used by cron)* | RSS 2.0 | `blogs.nvidia.com/feed/` | ✓ |
+| `sitemap` | XML sitemap | `blogs.nvidia.com/post-sitemap.xml` | ✓ |
+| `developer` | RSS (Atom) | `developer.nvidia.com/blog/feed/` | ✓ 200 OK |
+| `press` | RSS 2.0 | `nvidianews.nvidia.com/rss` | ✓ 200 OK |
+| `geforce` | HTML scrape | `nvidia.com/en-us/geforce/news/` | links extracted, no RSS exists |
+| `all` | all four above in parallel | `limit/4` per source | |
+
+All sources use **Mozilla Readability** (`@mozilla/readability` + `jsdom`) for content extraction — same algorithm Firefox uses for Reader Mode. This replaces hand-coded CSS selectors and works reliably across all four domains without knowing their internal class names.
 
 Schedule and trigger (`vercel.json`):
 
@@ -112,23 +126,45 @@ Schedule and trigger (`vercel.json`):
 { "crons": [{ "path": "/api/ingest", "schedule": "0 2 * * *" }] }
 ```
 
-- Runs **daily at 02:00 UTC**.
-- Endpoint can also be called manually on prod or locally: `curl https://elasticchat.vercel.app/api/ingest` (RSS, default) or `curl 'https://elasticchat.vercel.app/api/ingest?source=sitemap&limit=200'` (bulk historical).
-- `maxDuration = 300` is set in `src/app/api/ingest/route.ts` so a single invocation can ingest dozens of posts even with the 4.5s pacing between embed calls.
-- Returns a JSON summary `{ indexed, unchanged, skipped, errors }` so you can spot regressions in the Vercel cron log.
-
-Two ES indices, both managed by the route itself (`ensureIndices`):
-
-| Index | Purpose | Mapping |
-|---|---|---|
-| `nvidia-blogs` | One doc per chunk. Hybrid search target. | `url` keyword, `title` text, `date` date, `content` text, `chunk_index` int, `embedding` dense_vector(1024, cosine, indexed) |
-| `crawl-state` | One doc per source URL. Stores `content_hash` so unchanged posts skip re-embedding. | `url`, `content_hash`, `last_crawled`, `status` |
-
-For bulk loading (e.g. fresh DB or developer machine), use the local CLI (does **not** go through Vercel — runs against the same ES cluster directly):
+- Runs **daily at 02:00 UTC** with `source=rss` (blogs.nvidia.com only — stays within the 150-embed/day free-tier cap).
+- Additional sources can be triggered manually:
 
 ```bash
-npx tsx scripts/seed.ts 200                # 200 newest from sitemap3
-SKIP_EMBED=1 npx tsx scripts/seed.ts 200   # BM25-only when daily embed cap is hit
+# Last ~20 posts from developer.nvidia.com/blog
+curl 'https://elasticchat.vercel.app/api/ingest?source=developer&limit=20'
+
+# Press releases from nvidianews.nvidia.com
+curl 'https://elasticchat.vercel.app/api/ingest?source=press&limit=20'
+
+# All sources, 5 posts each
+curl 'https://elasticchat.vercel.app/api/ingest?source=all&limit=20'
+
+# Bulk historical backfill from blogs.nvidia.com sitemap
+curl 'https://elasticchat.vercel.app/api/ingest?source=sitemap&limit=200'
+```
+
+- `maxDuration = 300` (5 min) so a single invocation handles dozens of posts despite 4.5s pacing between embed calls.
+- Returns `{ success, source, fetched, indexed, unchanged, skipped, errors, sources[] }`.
+- Live ingestion status: [elasticchat.vercel.app/ingest](https://elasticchat.vercel.app/ingest) — shows last-crawled times, article list, and run history grouped by day.
+
+### ES indices
+
+Both indices are managed by `ensureIndices()` in the ingest route — no manual setup needed.
+
+| Index | Purpose | Key fields |
+|---|---|---|
+| `nvidia-blogs` | One doc per chunk. Hybrid search target. | `url` kw, `title` text, `date` date, `content` text, `chunk_index` int, `source` kw, `embedding` dense_vector(1024, cosine) |
+| `crawl-state` | One doc per source URL. Idempotency store. | `url`, `content_hash`, `last_crawled`, `status`, `source` |
+
+The `source` field on every document records which feed/site supplied the content (`blogs.nvidia.com`, `developer.nvidia.com`, `nvidianews.nvidia.com`, `nvidia.com/geforce`), enabling per-source filtering in search queries.
+
+### Bulk loading
+
+For a fresh DB or developer machine, use the local CLI (bypasses Vercel — hits the same ES cluster directly):
+
+```bash
+npx tsx scripts/seed.ts 200                # 200 newest posts from blogs.nvidia.com sitemap
+SKIP_EMBED=1 npx tsx scripts/seed.ts 200   # BM25-only when daily embed cap is exhausted
 ```
 
 ## Project layout
@@ -136,9 +172,10 @@ SKIP_EMBED=1 npx tsx scripts/seed.ts 200   # BM25-only when daily embed cap is h
 | Path | Purpose |
 |---|---|
 | `src/app/page.tsx` | Chat UI shell, wraps `Thread` with `AssistantRuntimeProvider`. Reads `?q=` and auto-sends. |
-| `src/app/eval/page.tsx` | Renders `eval-report.json` with per-case "Replay" buttons. |
+| `src/app/eval/page.tsx` | G-Eval results page — reads `eval-history.csv` (latest run metadata + scores) and `eval-report.json` (per-case detail). |
+| `src/app/ingest/page.tsx` | Ingestion dashboard — queries ES `crawl-state` live, shows last-crawled articles grouped by day. |
 | `src/app/api/chat/route.ts` | Streaming chat endpoint with `search` + `get_full_post` tools. |
-| `src/app/api/ingest/route.ts` | Cron-driven incremental ingest. |
+| `src/app/api/ingest/route.ts` | Cron-driven incremental ingest. Supports `?source=rss|sitemap|developer|press|geforce|all`. |
 | `src/components/assistant-ui/*` | Thread, ToolFallback, MarkdownText — reused, not hand-rolled. |
 | `src/lib/elasticsearch.ts` | Lazy ES client. |
 | `src/lib/embeddings.ts` | Cohere embeddings with 429 retry + daily-cap detection. |
@@ -212,7 +249,7 @@ MIT.
 
 ## Issues solved 
 
-Q: What's the latest GPU NVIDIA released?
+#### Q: What's the latest GPU NVIDIA released?
 
 ● Three layers, in order of how-deep-it-goes:
 
@@ -246,4 +283,11 @@ Q: What's the latest GPU NVIDIA released?
    a streaming error and the bubble never rendered — that's why curl tests passed (curl used the legacy {role, 
   content: "string"} shape directly) but the browser showed nothing. Fixed in 15cf49a. Codified now in design.md as
   the canonical AI-SDK-v6 invariant so it can't regress silently.
+
+#### Eval judge
+Switching to gpt-5.4-mini would be a real improvement over the status quo (out-of-tier vs in-tier), but it still
+  leaves the judge in-family. The well-known LLM-as-judge result is that same-family judges rate same-family outputs
+  higher by ~0.2–0.5 on a 5-point scale, regardless of actual quality. Mini vs nano is a different model, but they
+  share architecture, RLHF data, and refusal patterns — so the bias is reduced, not eliminated.
+
 

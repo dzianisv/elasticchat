@@ -9,6 +9,7 @@ import {
 } from '@assistant-ui/react'
 import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
 import { Thread } from '@/components/assistant-ui/thread'
+import { SiteFooter } from '@/components/site-footer'
 
 function ReplayFromQueryParam() {
   const runtime = useAssistantRuntime()
@@ -58,16 +59,25 @@ function HomeShell() {
               Ask about GPUs, AI platforms, products, and recent announcements
             </p>
           </div>
-          <Link
-            href="/eval"
-            className="text-xs text-muted-foreground hover:text-[#9bd02a]"
-          >
-            G-Eval →
-          </Link>
+          <nav className="flex items-center gap-4 text-xs">
+            <Link
+              href="/eval"
+              className="text-muted-foreground hover:text-[#9bd02a]"
+            >
+              G-Eval →
+            </Link>
+            <Link
+              href="/ingest"
+              className="text-muted-foreground hover:text-[#9bd02a]"
+            >
+              Ingestion →
+            </Link>
+          </nav>
         </header>
         <div className="flex-1 min-h-0">
           <Thread />
         </div>
+        <SiteFooter />
       </div>
     </AssistantRuntimeProvider>
   )

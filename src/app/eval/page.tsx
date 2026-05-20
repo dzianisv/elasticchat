@@ -1,4 +1,7 @@
 import Link from "next/link";
+import { readFileSync } from "fs";
+import { SiteFooter } from "@/components/site-footer";
+import { resolve } from "path";
 import evalReport from "../../../eval-report.json";
 
 type Scores = {
@@ -26,20 +29,109 @@ type Report = {
 
 const report = evalReport as Report;
 
+type HistoryRow = {
+  timestamp: string;
+  commit: string;
+  chat_model: string;
+  prompt_author_model: string;
+  judge_model: string;
+  n_cases: number;
+  relevance: number;
+  citation: number;
+  accuracy: number;
+  category_averages: Record<
+    string,
+    { relevance: number; citation: number; accuracy: number }
+  >;
+};
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let cell = "";
+  let row: string[] = [];
+  let i = 0;
+  let inQuotes = false;
+  while (i < text.length) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') {
+        cell += '"';
+        i += 2;
+        continue;
+      }
+      if (c === '"') {
+        inQuotes = false;
+        i++;
+        continue;
+      }
+      cell += c;
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = true;
+      i++;
+      continue;
+    }
+    if (c === ",") {
+      row.push(cell);
+      cell = "";
+      i++;
+      continue;
+    }
+    if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell);
+      rows.push(row);
+      cell = "";
+      row = [];
+      i++;
+      continue;
+    }
+    cell += c;
+    i++;
+  }
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
+}
+
+function loadHistory(): HistoryRow[] {
+  try {
+    const text = readFileSync(resolve(process.cwd(), "eval-history.csv"), "utf-8");
+    const rows = parseCsv(text);
+    if (rows.length < 2) return [];
+    const header = rows[0];
+    const idx = (name: string) => header.indexOf(name);
+    return rows.slice(1).map((r) => ({
+      timestamp: r[idx("timestamp")] || "",
+      commit: r[idx("commit")] || "",
+      chat_model: r[idx("chat_model")] || "",
+      prompt_author_model: r[idx("prompt_author_model")] || "",
+      judge_model: r[idx("judge_model")] || "",
+      n_cases: Number(r[idx("n_cases")] || 0),
+      relevance: Number(r[idx("relevance")] || 0),
+      citation: Number(r[idx("citation")] || 0),
+      accuracy: Number(r[idx("accuracy")] || 0),
+      category_averages: (() => {
+        try {
+          return JSON.parse(r[idx("category_averages")] || "{}");
+        } catch {
+          return {};
+        }
+      })(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 function scoreClass(n: number): string {
   if (n >= 4) return "text-[#9bd02a]";
   if (n >= 3) return "text-yellow-400";
   return "text-red-400";
-}
-
-function avg(nums: number[]): number {
-  if (!nums.length) return 0;
-  return nums.reduce((a, b) => a + b, 0) / nums.length;
-}
-
-function overallAvg(field: keyof Scores): number {
-  const nums = report.results.map((r) => r.scores[field] as number);
-  return avg(nums);
 }
 
 export const metadata = {
@@ -47,15 +139,28 @@ export const metadata = {
 };
 
 export default function EvalPage() {
-  const allCategories = Object.keys(report.categoryAverages);
-  const overall = {
-    relevance: overallAvg("relevance"),
-    citation: overallAvg("citation"),
-    accuracy: overallAvg("accuracy"),
+  const history = loadHistory();
+  const latest = history[history.length - 1];
+
+  // Fallback to eval-report.json if CSV is empty (first deploy before any run).
+  const headline = latest ?? {
+    timestamp: report.timestamp,
+    commit: "",
+    chat_model: "gpt-5.4-nano",
+    prompt_author_model: "claude-opus-4-7",
+    judge_model: "gpt-5",
+    n_cases: report.results.length,
+    relevance: 0,
+    citation: 0,
+    accuracy: 0,
+    category_averages: report.categoryAverages,
   };
-  const reportDate = new Date(report.timestamp);
+
+  const headlineDate = new Date(headline.timestamp);
+  const categories = Object.keys(headline.category_averages);
 
   return (
+    <>
     <main className="mx-auto max-w-5xl px-6 py-10">
       <header className="mb-8 flex items-start justify-between gap-4">
         <div>
@@ -66,11 +171,45 @@ export default function EvalPage() {
           </div>
           <h1 className="mt-2 text-2xl font-semibold">G-Eval results</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            LLM-as-judge scores (0–5) on a fixed test set of {report.results.length} questions.
-            Generated {reportDate.toUTCString()}.
+            LLM-as-judge scores (0–5) on a fixed test set of {headline.n_cases} questions.
+            Generated {headlineDate.toUTCString()}.
           </p>
         </div>
       </header>
+
+      <section className="mb-6">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          Run metadata
+        </h2>
+        <div className="overflow-x-auto rounded-lg border">
+          <table className="w-full text-sm">
+            <tbody>
+              <tr className="border-b">
+                <td className="w-40 px-4 py-2 text-muted-foreground">Commit</td>
+                <td className="px-4 py-2 font-mono text-xs">
+                  {headline.commit || "(unknown)"}
+                </td>
+              </tr>
+              <tr className="border-b">
+                <td className="px-4 py-2 text-muted-foreground">Chat model</td>
+                <td className="px-4 py-2 font-mono text-xs">{headline.chat_model}</td>
+              </tr>
+              <tr className="border-b">
+                <td className="px-4 py-2 text-muted-foreground">
+                  Prompt-tuning model
+                </td>
+                <td className="px-4 py-2 font-mono text-xs">
+                  {headline.prompt_author_model}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-4 py-2 text-muted-foreground">Judge model</td>
+                <td className="px-4 py-2 font-mono text-xs">{headline.judge_model}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <section className="mb-8">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -87,8 +226,8 @@ export default function EvalPage() {
               </tr>
             </thead>
             <tbody>
-              {allCategories.map((cat) => {
-                const a = report.categoryAverages[cat];
+              {categories.map((cat) => {
+                const a = headline.category_averages[cat];
                 return (
                   <tr key={cat} className="border-b last:border-b-0">
                     <td className="px-4 py-2 font-medium">{cat}</td>
@@ -106,20 +245,64 @@ export default function EvalPage() {
               })}
               <tr className="bg-muted/30 font-medium">
                 <td className="px-4 py-2">OVERALL</td>
-                <td className={`px-4 py-2 ${scoreClass(overall.relevance)}`}>
-                  {overall.relevance.toFixed(2)}
+                <td className={`px-4 py-2 ${scoreClass(headline.relevance)}`}>
+                  {headline.relevance.toFixed(2)}
                 </td>
-                <td className={`px-4 py-2 ${scoreClass(overall.citation)}`}>
-                  {overall.citation.toFixed(2)}
+                <td className={`px-4 py-2 ${scoreClass(headline.citation)}`}>
+                  {headline.citation.toFixed(2)}
                 </td>
-                <td className={`px-4 py-2 ${scoreClass(overall.accuracy)}`}>
-                  {overall.accuracy.toFixed(2)}
+                <td className={`px-4 py-2 ${scoreClass(headline.accuracy)}`}>
+                  {headline.accuracy.toFixed(2)}
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
+
+      {history.length > 1 && (
+        <section className="mb-8">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Run history
+          </h2>
+          <div className="overflow-x-auto rounded-lg border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/30 text-left">
+                  <th className="px-4 py-2 font-medium">Date</th>
+                  <th className="px-4 py-2 font-medium">Commit</th>
+                  <th className="px-4 py-2 font-medium">Chat</th>
+                  <th className="px-4 py-2 font-medium">Judge</th>
+                  <th className="px-4 py-2 font-medium">R</th>
+                  <th className="px-4 py-2 font-medium">C</th>
+                  <th className="px-4 py-2 font-medium">A</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...history].reverse().map((h, i) => (
+                  <tr key={i} className="border-b last:border-b-0">
+                    <td className="px-4 py-2 text-xs text-muted-foreground">
+                      {new Date(h.timestamp).toISOString().slice(0, 16).replace("T", " ")}
+                    </td>
+                    <td className="px-4 py-2 font-mono text-xs">{h.commit}</td>
+                    <td className="px-4 py-2 font-mono text-xs">{h.chat_model}</td>
+                    <td className="px-4 py-2 font-mono text-xs">{h.judge_model}</td>
+                    <td className={`px-4 py-2 ${scoreClass(h.relevance)}`}>
+                      {h.relevance.toFixed(2)}
+                    </td>
+                    <td className={`px-4 py-2 ${scoreClass(h.citation)}`}>
+                      {h.citation.toFixed(2)}
+                    </td>
+                    <td className={`px-4 py-2 ${scoreClass(h.accuracy)}`}>
+                      {h.accuracy.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -191,7 +374,10 @@ export default function EvalPage() {
       </section>
 
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
-        Source: <code>scripts/eval.ts</code> (gpt-4o-mini judge, 0 temperature).
+        Source: <code>scripts/eval.ts</code>. Each run appends a row to{" "}
+        <code>eval-history.csv</code> (commit + models + scores) and rewrites{" "}
+        <code>eval-report.json</code> (per-case detail).
+        <br />
         Re-generate with{" "}
         <code>
           EVAL_CHAT_URL=https://elasticchat.vercel.app/api/chat npx tsx scripts/eval.ts
@@ -199,5 +385,7 @@ export default function EvalPage() {
         .
       </footer>
     </main>
+    <SiteFooter />
+    </>
   );
 }
