@@ -205,14 +205,79 @@ function ToolFallbackArgs({
   );
 }
 
+type SearchHit = {
+  index?: number;
+  title?: string;
+  url?: string;
+  date?: string;
+  content?: string;
+};
+
+function isSearchHitArray(value: unknown): value is SearchHit[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (v) =>
+        v !== null &&
+        typeof v === "object" &&
+        ("title" in v || "url" in v || "content" in v),
+    )
+  );
+}
+
+function SearchHitRow({ hit }: { hit: SearchHit }) {
+  const [open, setOpen] = useState(false);
+  const snippet = (hit.content || "").slice(0, 240);
+  const hasMore = (hit.content || "").length > 240;
+  return (
+    <div className="rounded-md border bg-background/50 px-3 py-2 text-xs">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <a
+            href={hit.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block truncate font-medium text-[#9bd02a] hover:underline"
+          >
+            {hit.title || hit.url || "(untitled)"}
+          </a>
+          <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+            {hit.date ? `${hit.date} · ` : ""}
+            {hit.url}
+          </div>
+        </div>
+        {hasMore && (
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+          >
+            {open ? "Hide" : "Show"}
+          </button>
+        )}
+      </div>
+      <p className="mt-1 whitespace-pre-wrap text-muted-foreground">
+        {open ? hit.content : snippet}
+        {!open && hasMore ? "…" : ""}
+      </p>
+    </div>
+  );
+}
+
 function ToolFallbackResult({
   result,
+  toolName,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
   result?: unknown;
+  toolName?: string;
 }) {
   if (result === undefined) return null;
+
+  const renderAsSearchHits =
+    toolName === "search" && isSearchHitArray(result);
 
   return (
     <div
@@ -223,10 +288,20 @@ function ToolFallbackResult({
       )}
       {...props}
     >
-      <p className="aui-tool-fallback-result-header font-semibold">Result:</p>
-      <pre className="aui-tool-fallback-result-content whitespace-pre-wrap">
-        {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
-      </pre>
+      <p className="aui-tool-fallback-result-header font-semibold">
+        Result{renderAsSearchHits ? ` (${(result as SearchHit[]).length} hits)` : ""}:
+      </p>
+      {renderAsSearchHits ? (
+        <div className="mt-2 flex flex-col gap-1.5">
+          {(result as SearchHit[]).map((hit, i) => (
+            <SearchHitRow key={hit.url || i} hit={hit} />
+          ))}
+        </div>
+      ) : (
+        <pre className="aui-tool-fallback-result-content whitespace-pre-wrap">
+          {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+        </pre>
+      )}
     </div>
   );
 }
@@ -288,7 +363,9 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
           argsText={argsText}
           className={cn(isCancelled && "opacity-60")}
         />
-        {!isCancelled && <ToolFallbackResult result={result} />}
+        {!isCancelled && (
+          <ToolFallbackResult result={result} toolName={toolName} />
+        )}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );

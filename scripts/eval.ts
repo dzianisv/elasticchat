@@ -34,6 +34,7 @@ const testCases: TestCase[] = [
   { category: "conceptual", question: "How does DLSS work?" },
   // Temporal
   { category: "temporal", question: "What's the latest GPU NVIDIA released?" },
+  { category: "temporal", question: "When was the latest NVIDIA GPU released?" },
   { category: "temporal", question: "What are the newest blog posts?" },
   { category: "temporal", question: "Recent announcements from NVIDIA" },
   { category: "temporal", question: "What did NVIDIA announce this year?" },
