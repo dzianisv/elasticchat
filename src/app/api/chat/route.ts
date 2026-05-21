@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { streamText, tool, jsonSchema, stepCountIs, convertToModelMessages } from 'ai'
 import { createAzure } from '@ai-sdk/azure'
-import { waitUntil } from '@vercel/functions'
+import { after } from 'next/server'
 import { es } from '@/lib/elasticsearch'
 import { embedTexts } from '@/lib/embeddings'
 import { Langfuse } from 'langfuse'
@@ -98,10 +98,30 @@ const getFullPostSchema = jsonSchema({
 export async function POST(req: Request) {
   const { messages } = await req.json()
 
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim()
+    || req.headers.get('x-real-ip')
+    || 'unknown'
+  const userAgent = req.headers.get('user-agent') || 'unknown'
+
+  // Stable session ID: hash of the first user message (groups all turns of one conversation)
+  const firstUserText: string = (() => {
+    const m = messages.find((msg: any) => msg.role === 'user')
+    if (!m) return ''
+    if (Array.isArray(m.parts)) return m.parts.find((p: any) => p.type === 'text')?.text || ''
+    return typeof m.content === 'string' ? m.content : ''
+  })()
+  const sessionId = firstUserText
+    ? require('crypto').createHash('sha256').update(firstUserText.substring(0, 200)).digest('hex').substring(0, 16)
+    : undefined
+
   const trace = langfuse?.trace({
     name: 'chat-request',
-    metadata: { messageCount: messages.length },
+    userId: ip,
+    sessionId,
+    metadata: { messageCount: messages.length, userAgent, ip },
   })
+
+  console.log('[langfuse] initialized:', !!langfuse, '| traceId:', trace?.id ?? 'none')
 
   // useChat (AI SDK v6) sends UIMessage[] with parts; streamText needs ModelMessage[]
   const modelMessages = Array.isArray(messages) && messages[0]?.parts
@@ -211,8 +231,9 @@ export async function POST(req: Request) {
       }),
     },
     onFinish: ({ usage }) => {
+      console.log('[langfuse] onFinish called, flushing...')
       if (!langfuse) return
-      waitUntil((async () => {
+      after(async () => {
         try {
           trace?.generation({
             name: 'chat-completion',
@@ -223,10 +244,11 @@ export async function POST(req: Request) {
             },
           })
           await langfuse.flushAsync()
-        } catch {
-          // Ignore langfuse errors
+          console.log('[langfuse] flush complete')
+        } catch (e) {
+          console.error('[langfuse] flush error:', e)
         }
-      })())
+      })
     },
   })
 
