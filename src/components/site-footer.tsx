@@ -10,8 +10,8 @@ const navLinks = [
 
 export function SiteFooter() {
   return (
-    <footer className="border-t border-border bg-background/80 px-6 py-3 flex items-center justify-between gap-4 text-xs text-muted-foreground">
-      <nav className="flex items-center gap-4">
+    <footer className="border-t border-border bg-background/80 px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between gap-4 text-xs text-muted-foreground">
+      <nav className="flex items-center gap-3 sm:gap-4">
         {navLinks.map(({ href, label }) => (
           <Link
             key={href}

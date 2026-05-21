@@ -83,34 +83,34 @@ function HomeShell({ initialMessages, onNewChat }: HomeShellProps) {
     <AssistantRuntimeProvider runtime={runtime}>
       <ReplayFromQueryParam />
       <div className="flex h-screen flex-col bg-background text-foreground">
-        <header className="border-b border-border bg-background/80 backdrop-blur px-6 py-4 flex items-center gap-3 sticky top-0 z-10">
-          <div className="w-9 h-9 rounded-md bg-[#76b900] flex items-center justify-center shadow-sm shadow-[#76b900]/30">
-            <span className="text-black font-bold">N</span>
+        <header className="border-b border-border bg-background/80 backdrop-blur px-3 sm:px-6 py-3 sm:py-4 flex items-center gap-2 sm:gap-3 sticky top-0 z-10">
+          <div className="w-8 h-8 sm:w-9 sm:h-9 shrink-0 rounded-md bg-[#76b900] flex items-center justify-center shadow-sm shadow-[#76b900]/30">
+            <span className="text-black font-bold text-sm sm:text-base">N</span>
           </div>
-          <div className="flex-1">
-            <h1 className="text-lg font-semibold leading-tight">{APP_NAME}</h1>
-            <p className="text-xs text-muted-foreground">
+          <div className="flex-1 min-w-0">
+            <h1 className="text-base sm:text-lg font-semibold leading-tight truncate">{APP_NAME}</h1>
+            <p className="text-xs text-muted-foreground hidden sm:block">
               Ask about GPUs, AI platforms, products, and recent announcements
             </p>
           </div>
-          <nav className="flex items-center gap-4 text-xs">
+          <nav className="flex items-center gap-2 sm:gap-4 text-xs shrink-0">
             <button
               onClick={onNewChat}
               className="flex items-center gap-1 text-muted-foreground hover:text-[#9bd02a] transition-colors"
               title="Start a new conversation"
             >
-              <PlusIcon className="size-3.5" />
-              New chat
+              <PlusIcon className="size-4 sm:size-3.5" />
+              <span className="hidden sm:inline">New chat</span>
             </button>
             <Link
               href="/eval"
-              className="text-muted-foreground hover:text-[#9bd02a]"
+              className="hidden sm:inline text-muted-foreground hover:text-[#9bd02a]"
             >
               G-Eval →
             </Link>
             <Link
               href="/ingest"
-              className="text-muted-foreground hover:text-[#9bd02a]"
+              className="hidden sm:inline text-muted-foreground hover:text-[#9bd02a]"
             >
               Ingestion →
             </Link>
