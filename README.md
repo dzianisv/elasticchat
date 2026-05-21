@@ -281,8 +281,12 @@ Everything in this repo — the chat UI, the chat API, the ingest pipeline, the 
               │     SHA-256 dedup per URL       │
               └─────────────────────────────────┘
 
-Optional:
-  /api/chat → Langfuse Cloud   (trace per request, token usage)
+POST /api/chat ──(optional)──▶ ┌──────────────────────────────┐
+  when LANGFUSE_SECRET_KEY set  │   Langfuse Cloud             │
+                                │   cloud.langfuse.com         │
+                                │   · trace per request        │
+                                │   · token usage + latency    │
+                                └──────────────────────────────┘
 ```
 
 External dependencies:
@@ -290,6 +294,7 @@ External dependencies:
 - **Azure OpenAI** — chat completions, called from `/api/chat` per request.
 - **Azure dev AI** — Cohere embeddings, called from `/api/chat` (query-time) and `/api/ingest` (index-time).
 - **Elasticsearch 8** — vector + BM25 store. Two indices, both managed by `ensureIndices()` in the ingest route.
+- **Langfuse Cloud** *(optional)* — LLM observability. Active when `LANGFUSE_SECRET_KEY` is set; inactive otherwise (no-op, zero overhead).
 
 ### Deploying
 
