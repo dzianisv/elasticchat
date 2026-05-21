@@ -1,178 +1,194 @@
-# NVIDIA Blog Chat Assistant — Design Document
+# NVIDIA Assistant — Design Document
+
+Single source of truth for architecture, invariants, file responsibilities, and definition of "done".
 
 ## Overview
 
-An AI-powered chat assistant that answers questions about NVIDIA technology, products, and announcements by searching indexed blog posts from blogs.nvidia.com.
+A RAG chatbot that answers NVIDIA questions by searching an Elasticsearch index of blog posts from multiple NVIDIA properties. The index is built from live RSS/Atom feeds and HTML-scraped listing pages; query-time retrieval uses hybrid BM25 + kNN (RRF). Every answer includes inline citations with source URLs.
 
 ## Architecture
 
 ```
-blogs.nvidia.com → [Vercel: Ingest cron] → [Elastic Cloud: search + state]
-User             → [Vercel: Chat API]    → [Elastic Cloud] + [LLM API]
-                   [Vercel: Chat UI]
-                                           [Langfuse: traces (optional)]
+blogs.nvidia.com      ┐
+developer.nvidia.com  ├── RSS / Atom / HTML scrape
+nvidianews.nvidia.com │       │
+nvidia.com/geforce    ┘       ▼
+docs.nvidia.com           GET /api/ingest  ← Vercel Cron (daily 02:00 UTC)
+                               │
+                        Elasticsearch 8
+                        (nvidia-blogs + crawl-state)
+                               │
+User → POST /api/chat ─────────┘ + Azure OpenAI (gpt-5.4-nano)
+       SSE stream → browser (assistant-ui Thread)
+                               │
+                        Langfuse (optional tracing)
 ```
 
 ## Stack
 
-| Layer | Choice | Notes |
-|---|---|---|
-| Framework | Next.js 16 (App Router) | AI SDK v6 native, streaming |
-| AI SDK | `ai` v6 + `@ai-sdk/openai` | `streamText`, `generateText`, `tool()` with `inputSchema` |
-| Chat UI | Custom (`@ai-sdk/react` useChat) | NVIDIA green theme, UIMessage/parts format |
-| Search | Elastic Cloud (Serverless ES 9.x) | Hybrid search: kNN + text with RRF |
-| LLM | Azure OpenAI gpt-5.4-nano (upgradeable to gpt-5.4) | Via `@ai-sdk/azure`, deployment-based URLs |
-| Embeddings | Azure Cohere-embed-v3-english (1024 dims) | Via `vibe-dev-ai.cognitiveservices.azure.com` |
-| Observability | Langfuse Cloud (optional) | Traces, spans, token usage |
-| Deploy | Vercel | Serverless functions, cron for ingest |
-| Sessions | Browser localStorage | Client sends history, no server-side session store |
-| Crawl state | Elasticsearch `crawl-state` index | Dedup via content hash |
+| Layer | Choice |
+|---|---|
+| Framework | Next.js 16 App Router, Turbopack, React 19 |
+| Chat UI | `@assistant-ui/react` + `@assistant-ui/react-ai-sdk` (Thread, ToolFallback, MarkdownText) |
+| AI SDK | `ai` v6 — `streamText`, `convertToModelMessages`, `tool` |
+| LLM | Azure OpenAI `gpt-5.4-nano` (env: `LLM_MODEL`) |
+| Embeddings | Azure Cohere-embed-v3-english, 1024-d (free tier: 15 req/min, 150 req/day) |
+| Search | Elasticsearch 8 — `dense_vector(1024, cosine)` + BM25 via `retriever.rrf` |
+| Observability | Langfuse Cloud (optional — wired, disabled when keys absent) |
+| Deploy | Vercel (single Next.js project: UI + API + cron) |
+| Eval | LLM-as-judge (`gpt-5`, env: `LLM_MODEL_MINI`) — 23 fixed cases, CSV history |
+
+## Critical invariants
+
+### AI SDK v6 message conversion
+
+`useChat` / `useChatRuntime` produces `UIMessage[]` (with `.parts`). `streamText` requires `ModelMessage[]` (with `.content`). These are different types. **Always call `await convertToModelMessages(messages)` before passing to `streamText`.**
+
+Failure mode without it: the API streams a JSON error immediately, the UI renders nothing, but `npm run build` and unit tests still pass. This is the hardest regression to catch — only a real browser test reveals it.
+
+### Definition of "done" for UI changes
+
+```bash
+BASE_URL=https://elasticchat.vercel.app npx playwright test tests/debug-live.spec.ts
+```
+
+The test must show a non-empty assistant bubble in the live DOM. `npm run build` passing is not sufficient.
 
 ## Environment Variables
 
-| Variable | Description | Required |
+| Variable | Required | Purpose |
 |---|---|---|
-| `ELASTICSEARCH_URL` | Elastic Cloud endpoint | Yes |
-| `ELASTICSEARCH_API_KEY` | Elastic Cloud API key | Yes |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | Yes |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL | Yes |
-| `AZURE_OPENAI_API_VERSION` | API version (e.g. `2025-01-01-preview`) | Yes |
-| `LLM_MODEL` | Deployment name (e.g. `gpt-5.4-nano`) | Yes |
-| `LLM_MODEL_MINI` | Lightweight model for query rewrite | Yes |
-| `AZURE_DEV_AI_API_KEY` | Azure AI key (for embeddings) | Yes |
-| `AZURE_DEV_AI_BASE_URL` | Azure AI endpoint | Yes |
-| `LANGFUSE_PUBLIC_KEY` | Langfuse public key | No |
-| `LANGFUSE_SECRET_KEY` | Langfuse secret key | No |
-| `LANGFUSE_BASEURL` | Langfuse endpoint | No |
+| `AZURE_OPENAI_API_KEY` | Yes | Chat completions |
+| `AZURE_OPENAI_ENDPOINT` | Yes | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_API_VERSION` | Yes | API version (default `2025-01-01-preview`) |
+| `LLM_MODEL` | Yes | Chat model deployment name (default `gpt-5.4-nano`) |
+| `LLM_MODEL_MINI` | Yes | Judge model for eval (default `gpt-5`) |
+| `AZURE_DEV_AI_API_KEY` | Yes | Cohere embeddings API key |
+| `AZURE_DEV_AI_BASE_URL` | Yes | Cohere embeddings endpoint |
+| `ELASTICSEARCH_URL` | Yes | ES cluster endpoint |
+| `ELASTICSEARCH_API_KEY` | Yes | ES API key |
+| `PROMPT_AUTHOR_MODEL` | No | Recorded in eval CSV (default `claude-opus-4-7`) |
+| `LANGFUSE_PUBLIC_KEY` | No | Enables Langfuse tracing when set |
+| `LANGFUSE_SECRET_KEY` | No | Enables Langfuse tracing when set |
+| `LANGFUSE_BASEURL` | No | Langfuse endpoint (default `https://cloud.langfuse.com`) |
+| `VERCEL_TOKEN` | No | For `vercel deploy --prod` from CLI |
 
-## Data Model
+## Data model
 
 ### `nvidia-blogs` index
 
+One document per text chunk (2000 chars, 200-char overlap).
+
 | Field | Type | Description |
 |---|---|---|
-| `url` | keyword | Blog post URL (used as doc ID for single-chunk posts) |
-| `parent_url` | keyword | Parent post URL (for multi-chunk posts) |
-| `title` | text (english) | Post title |
-| `content` | text (english) | Chunk text content |
-| `embedding` | dense_vector (1024, cosine) | Cohere-embed-v3-english vector |
-| `date` | date | Published date |
-| `tags` | keyword[] | Product names/technologies (H100, CUDA, etc.) |
-| `doc_type` | keyword | blog_post, press_release, tutorial, announcement |
-| `is_announcement` | boolean | Whether post announces a new product/service |
+| `_id` | keyword | `{url}#{chunk_index}` |
+| `url` | keyword | Source page URL |
+| `title` | text | Page title |
+| `date` | date | Published / last-modified date |
+| `content` | text | Chunk text |
+| `chunk_index` | integer | Position within the post |
+| `source` | keyword | Feed label (e.g. `blogs.nvidia.com`, `developer.nvidia.com`) |
+| `embedding` | dense_vector(1024, cosine) | Cohere-embed-v3-english vector; absent on BM25-only docs |
 
 ### `crawl-state` index
 
+One document per source URL. Used for idempotent re-crawling.
+
 | Field | Type | Description |
 |---|---|---|
-| `url` | keyword | Post URL |
-| `content_hash` | keyword | SHA256 of content (for change detection) |
-| `last_crawled` | date | Last crawl timestamp |
-| `status` | keyword | ok, error |
+| `_id` | keyword | Source URL |
+| `url` | keyword | Source URL (duplicate for filtering) |
+| `content_hash` | keyword | SHA256 of extracted text — skip re-index if unchanged |
+| `last_crawled` | date | Timestamp of last successful crawl |
+| `status` | keyword | `indexed` or `error` |
+| `source` | keyword | Feed label (same as `nvidia-blogs`) |
 
-## Agent Design
+## Ingest pipeline
 
-### System Prompt
-
-The agent MUST:
-- Always search before answering (never fabricate)
-- Cite every claim with numbered references `[1]`, `[2]`
-- List all sources at the end with title + URL
-- Use `sort_by: "date_desc"` for temporal queries
-- Decline off-topic questions gracefully
-
-### Tools
-
-#### `search`
-- Parameters: `query` (string), `sort_by` (relevance|date_desc), `doc_type` (optional), `tags` (optional), `limit` (optional)
-- Relevance mode: hybrid kNN + text with RRF
-- Date mode: text match + date sort descending
-
-#### `get_full_post`
-- Parameters: `url` (string)
-- Fetches all chunks for a post by `parent_url` term query
-
-### Multi-turn Query Rewrite
-
-When conversation has >2 messages, the last user message is rewritten into a standalone query using `generateText` before being used in search. This handles follow-ups like "what about that one?" or "tell me more".
-
-## Ingest Pipeline
-
-1. **Discovery**: Paginate WP REST API at `blogs.nvidia.com/wp-json/wp/v2/posts` (fallback: HTML scraping if API doesn't return content)
-2. **Dedup**: Check `crawl-state` index, skip if content hash matches
-3. **Enrichment**: LLM extracts tags, doc_type, is_announcement
-4. **Chunking**: 2048 chars (~512 tokens), 256 char overlap, paragraph-aware
-5. **Embedding**: Azure Cohere-embed-v3-english, batch up to 100 chunks
-6. **Indexing**: Bulk upsert to `nvidia-blogs`, update `crawl-state`
-
-Runs as Vercel cron (`/api/ingest`) hourly, or manually via `npx tsx scripts/ingest.ts [limit]`.
-
-## Evaluation
-
-20 questions across 4 categories scored by LLM-as-judge (0-5):
-- **Conceptual** (5): CUDA, tensor cores, NeMo, TensorRT, DLSS
-- **Temporal** (5): latest GPU, newest posts, recent announcements
-- **Specific Product** (5): H100 bandwidth, RTX 5090, DGX Spark, Jetson Orin, A100 vs H100
-- **Edge Cases** (5): off-topic, vague, empty input
-
-Metrics: relevance, citation quality, accuracy.
-
-Run: `npx tsx scripts/eval.ts` → outputs `eval-report.json`.
-
-## File Structure
+Route: `GET /api/ingest` (`src/app/api/ingest/route.ts`)
 
 ```
-src/
-  app/
-    api/
-      chat/route.ts      — Agent API (streamText + tools)
-      ingest/route.ts    — Cron ingest endpoint
-    page.tsx             — Chat UI
-    layout.tsx           — Root layout
-  lib/
-    elasticsearch.ts     — ES client singleton
-    embeddings.ts        — Azure embedding function
-    indexMappings.ts     — Index mapping definitions
-scripts/
-  ingest.ts              — Full ingest pipeline (CLI)
-  eval.ts                — Eval suite with LLM-as-judge
-  migrate-to-cloud.ts    — Local ES → Cloud ES migration
-  lib/
-    chunker.ts           — Paragraph-aware text chunking
-    enrichment.ts        — LLM metadata extraction
-docs/
-  design.md              — This file
-DEPLOY.md                — Deployment checklist
-vercel.json              — Cron config
+1. ensureIndices()       — create nvidia-blogs + crawl-state if missing
+2. discover URLs         — source-specific (see Sources section)
+3. for each URL:
+   a. fetchContent()     — Readability (Firefox Reader Mode) → cheerio fallback
+   b. sha256(text)       — skip if matches crawl-state hash
+   c. deleteByQuery()    — remove old chunks for this URL
+   d. chunkText()        — 2000-char chunks, 200-char overlap
+   e. embedTexts()       — 16-chunk batches; 4.5s pacing between batches
+                           skipped if ?skip_embed=1
+   f. es.bulk()          — upsert all chunks (with or without embedding field)
+4. update crawl-state    — url, content_hash, last_crawled, status, source
 ```
 
-## Current Status
+### Feed formats
 
-### Done
-- Chat API with tool calling (search + get_full_post)
-- Hybrid search (kNN + text + RRF)
-- Multi-turn query rewrite
-- Langfuse tracing (optional)
-- Ingest pipeline via WP API with crawl_state dedup
-- LLM enrichment (tags, doc_type, is_announcement)
-- Eval script (20 questions)
-- 37 docs migrated to Elastic Cloud (Serverless ES 9.x)
-- Citation format enforcement in system prompt
-
-### Open Issues
-1. **RRF on ES 9 Serverless**: Need to verify RRF retriever syntax works on serverless (may differ from ES 8.x).
-2. **Vercel deployment**: Account signup + env var config pending.
-3. **ES client version**: Using `@elastic/elasticsearch@8` against ES 9.x serverless — may need upgrade.
-4. **Model upgrade**: Currently using `gpt-5.4-nano` — can upgrade to `gpt-5.4` or `gpt-5.1` for better quality.
-
-### Eval Baseline (with gpt-4o-mini)
-
-| Category | Relevance | Citation | Accuracy |
+| Source | Format | URL | Notes |
 |---|---|---|---|
-| Conceptual | 4.0 | 0.0 | 4.0 |
-| Temporal | 2.0 | 0.2 | 2.2 |
-| Specific Product | 4.2 | 0.4 | 4.2 |
-| Edge Cases | 2.4 | 0.0 | 4.2 |
-| **Overall** | **3.15** | **0.15** | **3.65** |
+| `rss` (default) | RSS 2.0 | `blogs.nvidia.com/feed/` | `<item>` / `<pubDate>` |
+| `sitemap` | XML sitemap | `blogs.nvidia.com/post-sitemap.xml` | sorted newest-first |
+| `developer` | Atom | `developer.nvidia.com/blog/feed/` | `<entry>` / `<link rel=alternate>` / `<published>` |
+| `press` | RSS 2.0 | `nvidianews.nvidia.com/rss.xml` | Note: `/rss` (no extension) returns HTML |
+| `geforce` | HTML scrape | `nvidia.com/en-us/geforce/news/` | no RSS exists |
+| `docs` | HTML scrape | `docs.nvidia.com/` | hub page → sub-doc links |
+| `all` | all 5 above | parallel | `floor(limit/5)` per source |
 
-Citation score expected to improve with stronger system prompt (applied after eval) and a more capable model (gpt-5.x).
+### Embedding rate limits
+
+Free-tier cap: **15 req/min, 150 req/day** (Azure Cohere-embed-v3-english).
+
+On 429: `embeddings.ts` waits 65s and retries (up to 5×). With a full daily cap, this makes even a single post take >300s, exceeding Vercel's `maxDuration`. **Use `?skip_embed=1` when the cap is exhausted** — documents are indexed BM25-only (no `embedding` field). BM25 search still works; kNN just has no candidates for those docs. Re-run without `skip_embed=1` the next day to backfill vectors.
+
+## Chat API
+
+Route: `POST /api/chat` (`src/app/api/chat/route.ts`)
+
+- Accepts `{ messages: UIMessage[] }` — converts to `ModelMessage[]` via `convertToModelMessages`
+- `streamText` with two tools:
+  - **`search`**: `query`, `sort_by` (relevance|date_desc), `limit` → ES hybrid RRF query
+  - **`get_full_post`**: `url` → all chunks for a URL, concatenated
+- On embed 429 at query time: falls back to BM25-only search automatically
+- Langfuse: creates a trace per request with `model`, `userId`, token usage. Disabled when `LANGFUSE_SECRET_KEY` is absent.
+
+## Eval suite
+
+Script: `scripts/eval.ts`
+
+23 fixed test cases across 4 categories:
+
+| Category | Count | Examples |
+|---|---|---|
+| conceptual | 5 | "What is CUDA?", "How does DLSS work?" |
+| temporal | 6 | "What's the latest GPU NVIDIA released?", "Recent announcements" |
+| specific_product | 5 | "H100 memory bandwidth", "RTX 5090 specs" |
+| edge_cases | 7 | empty string, typo ("nvidea tensor cores"), Japanese query, 400-word technical query, off-topic |
+
+Each case is scored 0–5 by `LLM_MODEL_MINI` (currently `gpt-5`) on three dimensions: **relevance**, **citation**, **accuracy**.
+
+**Regression gate**: after each run, compares scores to the previous CSV row. If any dimension drops >0.5 points, exits with code 1.
+
+**Latency tracking**: `latency_ms` recorded per case; `latency_p50_ms` and `latency_p95_ms` appended to `eval-history.csv` and `eval-report.json`.
+
+Output files:
+- `eval-report.json` — full per-case results + category averages + latency
+- `eval-history.csv` — one row per run: timestamp, commit, models, scores, latency
+
+## File responsibilities
+
+| Path | Responsibility |
+|---|---|
+| `src/app/page.tsx` | Chat UI shell — `AssistantRuntimeProvider` + `Thread`. Reads `?q=` and auto-sends. |
+| `src/app/eval/page.tsx` | G-Eval results — reads `eval-history.csv` + `eval-report.json`, renders scores and Replay links. |
+| `src/app/ingest/page.tsx` | Ingestion dashboard — live ES query on `crawl-state`, source breakdown table, stat tiles. |
+| `src/app/api/chat/route.ts` | Streaming chat with `search` + `get_full_post` tools. Langfuse tracing. |
+| `src/app/api/ingest/route.ts` | Cron-triggered ingest. Multi-source. `?skip_embed=1` for BM25-only mode. |
+| `src/components/assistant-ui/*` | Thread, ToolFallback, MarkdownText — from `@assistant-ui/react`. |
+| `src/lib/appConfig.ts` | `APP_NAME = "NVIDIA Assistant"` — single source of truth for app name. |
+| `src/lib/elasticsearch.ts` | Lazy ES client singleton. |
+| `src/lib/embeddings.ts` | `embedTexts()` — batches of 16, 429 retry with 65s backoff, throws after 5 attempts. |
+| `src/lib/indexMappings.ts` | ES mapping definitions for both indices. |
+| `scripts/seed.ts` | Local bulk loader — bypasses Vercel, hits ES cluster directly. Supports `SKIP_EMBED=1`. |
+| `scripts/eval.ts` | G-Eval runner — streams from live API, scores with LLM judge, writes CSV + JSON. |
+| `tests/*.spec.ts` | Playwright E2E tests. |
+| `vercel.json` | Cron: `GET /api/ingest` daily at 02:00 UTC. |
+| `docs/design.md` | This file. |
