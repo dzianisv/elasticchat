@@ -9,6 +9,7 @@ export const nvidiaBlogsMapping = {
       date: { type: 'date' as const },
       content: { type: 'text' as const },
       chunk_index: { type: 'integer' as const },
+      source: { type: 'keyword' as const },
       embedding: {
         type: 'dense_vector' as const,
         dims: 1024,

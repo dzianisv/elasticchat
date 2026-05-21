@@ -22,13 +22,15 @@ interface BlogTitleMeta {
 }
 
 // All sources the ingest route knows about, in display order.
+// esLabel must match the `source` field stored in ES by the ingest route.
+// RSS and sitemap both write 'blogs.nvidia.com' so they share a count.
 const ALL_SOURCES = [
-  { key: 'rss', label: 'blogs.nvidia.com (RSS)', param: 'rss' },
-  { key: 'sitemap', label: 'blogs.nvidia.com (sitemap)', param: 'sitemap' },
-  { key: 'developer', label: 'developer.nvidia.com', param: 'developer' },
-  { key: 'press', label: 'nvidianews.nvidia.com', param: 'press' },
-  { key: 'geforce', label: 'nvidia.com/geforce', param: 'geforce' },
-  { key: 'docs', label: 'docs.nvidia.com', param: 'docs' },
+  { key: 'rss', label: 'blogs.nvidia.com (RSS)', param: 'rss', esLabel: 'blogs.nvidia.com' },
+  { key: 'sitemap', label: 'blogs.nvidia.com (sitemap)', param: 'sitemap', esLabel: 'blogs.nvidia.com' },
+  { key: 'developer', label: 'developer.nvidia.com', param: 'developer', esLabel: 'developer.nvidia.com' },
+  { key: 'press', label: 'nvidianews.nvidia.com', param: 'press', esLabel: 'nvidianews.nvidia.com' },
+  { key: 'geforce', label: 'nvidia.com/geforce', param: 'geforce', esLabel: 'nvidia.com/geforce' },
+  { key: 'docs', label: 'docs.nvidia.com', param: 'docs', esLabel: 'docs.nvidia.com' },
 ]
 
 interface DashboardData {
@@ -283,7 +285,7 @@ export default async function IngestionDashboardPage() {
               </thead>
               <tbody>
                 {ALL_SOURCES.map((s) => {
-                  const count = data.sourceCounts[s.label] ?? 0
+                  const count = data.sourceCounts[s.esLabel] ?? 0
                   return (
                     <tr key={s.key} className="border-t border-border">
                       <td className="px-4 py-2 font-mono">{s.label}</td>

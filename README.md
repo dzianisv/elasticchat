@@ -82,11 +82,11 @@ npx playwright test tests/e2e.spec.ts
 # Tool-call UI: clickable source links + foldable tool calls
 BASE_URL=https://elasticchat.vercel.app npx playwright test tests/debug-ui.spec.ts
 
-# G-Eval (23 fixed cases, ~5 min, writes eval-report.json)
+# G-Eval (24 fixed cases, ~5 min, writes eval-report.json)
 EVAL_CHAT_URL=https://elasticchat.vercel.app/api/chat npx tsx scripts/eval.ts
 ```
 
-The G-Eval suite covers four categories: **conceptual** (5 cases), **temporal** (6), **specific_product** (5), and **edge_cases** (7 — includes typo input, a Japanese-language query, and a long multi-constraint technical question about A100 vs H100 for medical image segmentation).
+The G-Eval suite covers four categories: **conceptual** (5 cases), **temporal** (6), **specific_product** (5), and **edge_cases** (8 — includes off-topic, AMD question, minimal queries, typo input, a Japanese-language query, and a long multi-constraint technical question about A100 vs H100 for medical image segmentation).
 
 Each run records `latency_ms` per case and computes **p50 / p95 latency**. These are appended to `eval-history.csv` (`latency_p50_ms`, `latency_p95_ms` columns) and included in `eval-report.json`. A **regression gate** fires after each run: if any score dimension (relevance, citation, or accuracy) drops more than 0.5 points vs the previous CSV row, the script exits with code 1.
 

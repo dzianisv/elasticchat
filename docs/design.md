@@ -36,7 +36,7 @@ User → POST /api/chat ─────────┘ + Azure OpenAI (gpt-5.4-n
 | Search | Elasticsearch 8 — `dense_vector(1024, cosine)` + BM25 via `retriever.rrf` |
 | Observability | Langfuse Cloud (optional — wired, disabled when keys absent) |
 | Deploy | Vercel (single Next.js project: UI + API + cron) |
-| Eval | LLM-as-judge (`gpt-5`, env: `LLM_MODEL_MINI`) — 23 fixed cases, CSV history |
+| Eval | LLM-as-judge (`gpt-5`, env: `LLM_MODEL_MINI`) — 24 fixed cases, CSV history |
 
 ## Critical invariants
 
@@ -161,7 +161,7 @@ Script: `scripts/eval.ts`
 | conceptual | 5 | "What is CUDA?", "How does DLSS work?" |
 | temporal | 6 | "What's the latest GPU NVIDIA released?", "Recent announcements" |
 | specific_product | 5 | "H100 memory bandwidth", "RTX 5090 specs" |
-| edge_cases | 7 | empty string, typo ("nvidea tensor cores"), Japanese query, 400-word technical query, off-topic |
+| edge_cases | 8 | off-topic, AMD question, minimal queries ("latest", "H100", ""), typo ("nvidea tensor cores"), Japanese query, 400-word A100 vs H100 technical query |
 
 Each case is scored 0–5 by `LLM_MODEL_MINI` (currently `gpt-5`) on three dimensions: **relevance**, **citation**, **accuracy**.
 

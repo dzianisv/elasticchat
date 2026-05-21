@@ -4,8 +4,9 @@ import { execSync } from "child_process";
 import { resolve } from "path";
 import { AzureOpenAI } from "openai";
 
-// Load .env.local
-const envPath = resolve(process.cwd(), ".env.local");
+// Load env: prefer .env.local, fall back to .env
+const envLocalPath = resolve(process.cwd(), ".env.local");
+const envPath = existsSync(envLocalPath) ? envLocalPath : resolve(process.cwd(), ".env");
 const envContent = readFileSync(envPath, "utf-8");
 for (const line of envContent.split("\n")) {
   const match = line.match(/^([^#=]+)=(.*)$/);
