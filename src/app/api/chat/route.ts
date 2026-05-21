@@ -1,26 +1,34 @@
 // @ts-nocheck
+import { randomUUID, createHash } from 'crypto'
 import { streamText, tool, jsonSchema, stepCountIs, convertToModelMessages } from 'ai'
 import { createAzure } from '@ai-sdk/azure'
 import { after } from 'next/server'
 import { es } from '@/lib/elasticsearch'
 import { embedTexts } from '@/lib/embeddings'
-import { Langfuse } from 'langfuse'
 
 export const maxDuration = 60
 
-let langfuse: Langfuse | null = null
-try {
-  if (process.env.LANGFUSE_SECRET_KEY) {
-    langfuse = new Langfuse({
-      publicKey: process.env.LANGFUSE_PUBLIC_KEY || '',
-      secretKey: process.env.LANGFUSE_SECRET_KEY || '',
-      baseUrl: process.env.LANGFUSE_BASEURL || 'https://cloud.langfuse.com',
-      flushAt: 1,       // don't batch — flush every event immediately
-      flushInterval: 0, // disable interval-based flushing
+const LANGFUSE_BASEURL = process.env.LANGFUSE_BASEURL || 'https://cloud.langfuse.com'
+const LANGFUSE_AUTH = process.env.LANGFUSE_SECRET_KEY
+  ? Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString('base64')
+  : null
+
+async function langfuseIngest(batch: object[]) {
+  if (!LANGFUSE_AUTH) return
+  try {
+    const res = await fetch(`${LANGFUSE_BASEURL}/api/public/ingestion`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${LANGFUSE_AUTH}`,
+      },
+      body: JSON.stringify({ batch }),
     })
+    const text = await res.text()
+    console.log('[langfuse] ingestion status:', res.status, text.slice(0, 200))
+  } catch (e) {
+    console.error('[langfuse] ingestion error:', e)
   }
-} catch {
-  // Langfuse not available, continue without tracing
 }
 
 const llm = createAzure({
@@ -111,17 +119,13 @@ export async function POST(req: Request) {
     return typeof m.content === 'string' ? m.content : ''
   })()
   const sessionId = firstUserText
-    ? require('crypto').createHash('sha256').update(firstUserText.substring(0, 200)).digest('hex').substring(0, 16)
+    ? createHash('sha256').update(firstUserText.substring(0, 200)).digest('hex').substring(0, 16)
     : undefined
 
-  const trace = langfuse?.trace({
-    name: 'chat-request',
-    userId: ip,
-    sessionId,
-    metadata: { messageCount: messages.length, userAgent, ip },
-  })
+  const traceId = randomUUID()
+  const traceTimestamp = new Date().toISOString()
 
-  console.log('[langfuse] initialized:', !!langfuse, '| traceId:', trace?.id ?? 'none')
+  console.log('[langfuse] enabled:', !!LANGFUSE_AUTH, '| traceId:', traceId)
 
   // useChat (AI SDK v6) sends UIMessage[] with parts; streamText needs ModelMessage[]
   const modelMessages = Array.isArray(messages) && messages[0]?.parts
@@ -231,23 +235,44 @@ export async function POST(req: Request) {
       }),
     },
     onFinish: ({ usage }) => {
-      console.log('[langfuse] onFinish called, flushing...')
-      if (!langfuse) return
+      console.log('[langfuse] onFinish called')
+      if (!LANGFUSE_AUTH) return
+      const generationId = randomUUID()
+      const finishTimestamp = new Date().toISOString()
       after(async () => {
-        try {
-          trace?.generation({
-            name: 'chat-completion',
-            usage: {
-              input: usage?.promptTokens,
-              output: usage?.completionTokens,
-              total: usage?.totalTokens,
+        console.log('[langfuse] after() running, auth:', !!LANGFUSE_AUTH)
+        await langfuseIngest([
+          {
+            id: randomUUID(),
+            type: 'trace-create',
+            timestamp: traceTimestamp,
+            body: {
+              id: traceId,
+              name: 'chat-request',
+              userId: ip,
+              sessionId,
+              metadata: { messageCount: messages.length, userAgent, ip },
+              timestamp: traceTimestamp,
             },
-          })
-          await langfuse.flushAsync()
-          console.log('[langfuse] flush complete')
-        } catch (e) {
-          console.error('[langfuse] flush error:', e)
-        }
+          },
+          {
+            id: randomUUID(),
+            type: 'generation-create',
+            timestamp: finishTimestamp,
+            body: {
+              id: generationId,
+              traceId,
+              name: 'chat-completion',
+              startTime: traceTimestamp,
+              endTime: finishTimestamp,
+              usage: {
+                input: usage?.promptTokens,
+                output: usage?.completionTokens,
+                total: usage?.totalTokens,
+              },
+            },
+          },
+        ])
       })
     },
   })
