@@ -12,19 +12,40 @@
 - Quality is measured continuously: visit [`/eval`](https://elasticchat.vercel.app/eval) for the latest LLM-as-judge scores and a "Replay" button on each test case.
 
 ```
-User ─▶ /              (assistant-ui Thread, useChatRuntime)
-            │
-            ▼
-       POST /api/chat   (AI SDK v6: convertToModelMessages → streamText)
-            │
-            ├── tool: search        ─▶ ES nvidia-blogs (RRF(BM25 + kNN))
-            └── tool: get_full_post ─▶ ES nvidia-blogs (by URL, all chunks)
-            │
-            ▼
-       SSE UIMessage stream back to the browser, rendered with markdown +
-       foldable tool-call cards.
+Browser (React 19 · @assistant-ui/react · localStorage)
+  │
+  │  static assets served from Vercel CDN edge
+  ├─▶  GET /       → pre-built Next.js shell (SPA, no server round-trip)
+  ├─▶  GET /eval   → pre-rendered G-Eval report page
+  │
+  │  dynamic requests routed to Vercel Lambda (Node.js)
+  ├─▶  GET /ingest → SSR: live crawl-state query against Elastic Cloud
+  │
+  └─▶  POST /api/chat  ── Vercel Lambda (maxDuration 60s) ──────────────────┐
+            │                                                                 │
+            │  AI SDK v6: convertToModelMessages → streamText                │
+            │                                                                 │
+            ├── tool: search ────────────────────▶ Elastic Cloud             │
+            │     RRF(BM25 + kNN, k=60)            nvidia-blogs index        │
+            ├── tool: get_full_post ─────────────▶ Elastic Cloud             │
+            │     fetch all chunks for a URL        nvidia-blogs index        │
+            │                                                                 │
+            │  embed query ──────────────────────▶ Azure Dev AI              │
+            │    (429 → BM25-only fallback)          Cohere-embed-v3-english  │
+            │                                                                 │
+            │  completion ───────────────────────▶ Azure OpenAI              │
+            │    gpt-5.4-nano                        East US 2                │
+            │                                                                 │
+            └─▶ SSE UIMessage stream → browser (markdown + tool-call cards)  │
+                                                                             ─┘
 
-Vercel cron (daily 02:00 UTC) ─▶ GET /api/ingest → RSS/Atom → chunk → embed → bulk index
+Vercel Cron (daily 02:00 UTC)
+  └─▶  GET /api/ingest  ── Vercel Lambda (maxDuration 300s)
+            │
+            ├── RSS / Atom / HTML scrape  (5 NVIDIA sources)
+            ├── chunk (2000 chars, 200 overlap)
+            ├── embed ──────────────────▶ Azure Dev AI (Cohere, 16/batch, 4.5s pacing)
+            └── bulk upsert ────────────▶ Elastic Cloud (nvidia-blogs + crawl-state)
 ```
 
 ## Stack
@@ -210,31 +231,58 @@ SKIP_EMBED=1 npx tsx scripts/seed.ts 200   # BM25-only when daily embed cap is e
 Everything in this repo — the chat UI, the chat API, the ingest pipeline, the `/eval` results page — is deployed as **one Next.js project on Vercel**. There are no separate workers or services.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Vercel project: elasticchat (single Next.js App-Router app)    │
-├─────────────────────────────────────────────────────────────────┤
-│  Static / SSR pages                                             │
-│    /          chat UI (assistant-ui Thread)                     │
-│    /eval      G-Eval results, pre-rendered from eval-report.json│
-│    /ingest    ingestion dashboard (live ES query)               │
-│                                                                 │
-│  Serverless route handlers                                      │
-│    POST /api/chat      maxDuration=60s, streams SSE             │
-│    GET  /api/ingest    maxDuration=300s, triggered by Vercel    │
-│                        Cron (vercel.json) or manual curl        │
-│                                                                 │
-│  Vercel Cron                                                    │
-│    "0 2 * * *"  →  /api/ingest  (daily 02:00 UTC)               │
-└─────────────────────────────────────────────────────────────────┘
-            │                              │
-            ▼                              ▼
-   Azure OpenAI                    Azure dev AI
-   (gpt-5.4-nano)                  (Cohere-embed-v3-english)
-            │                              │
-            └────────────┬─────────────────┘
-                         ▼
-              Elasticsearch 8 cluster
-              (nvidia-blogs + crawl-state indices)
+┌──────────────────────────────────────────────────────────────────────┐
+│  Vercel (single Next.js App-Router project)                          │
+│                                                                      │
+│  ┌─────────────────────── Edge CDN ──────────────────────────────┐  │
+│  │  Served from ~100 PoPs worldwide, zero cold-start             │  │
+│  │                                                               │  │
+│  │  GET /        pre-built React shell (SPA, client-side chat)   │  │
+│  │  GET /eval    pre-rendered G-Eval report (build-time JSON)    │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  ┌──────────────── SSR page (on-demand) ─────────────────────────┐  │
+│  │  GET /ingest   server-renders live crawl-state from ES        │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  ┌──────────────── Lambda functions (Node.js) ───────────────────┐  │
+│  │  POST /api/chat    maxDuration=60s    SSE stream              │  │
+│  │  GET  /api/ingest  maxDuration=300s   chunked JSON            │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  ┌──────────────── Vercel Cron ───────────────────────────────────┐  │
+│  │  "0 2 * * *"  →  GET /api/ingest  (daily 02:00 UTC)           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└───────────────┬───────────────────────┬──────────────────────────────┘
+                │                       │
+                ▼                       ▼
+   ┌────────────────────┐   ┌───────────────────────────┐
+   │   Azure OpenAI     │   │   Azure Dev AI            │
+   │   (East US 2)      │   │   (free tier)             │
+   │                    │   │                           │
+   │  gpt-5.4-nano      │   │  Cohere-embed-v3-english  │
+   │  · chat completion │   │  · 1024-d vectors         │
+   │  · eval judging    │   │  · 15 req/min             │
+   │    (gpt-5)         │   │  · 150 req/day cap        │
+   └─────────┬──────────┘   └─────────────┬─────────────┘
+             │                            │
+             └──────────────┬─────────────┘
+                            ▼
+              ┌─────────────────────────────────┐
+              │   Elastic Cloud                 │
+              │   Elasticsearch 8               │
+              │                                 │
+              │   nvidia-blogs                  │
+              │     dense_vector(1024, cosine)  │
+              │     BM25 + kNN via RRF          │
+              │     ~5 sources, chunked docs    │
+              │                                 │
+              │   crawl-state                   │
+              │     SHA-256 dedup per URL       │
+              └─────────────────────────────────┘
+
+Optional:
+  /api/chat → Langfuse Cloud   (trace per request, token usage)
 ```
 
 External dependencies:
