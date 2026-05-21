@@ -1,8 +1,9 @@
 'use client'
 
-import { Suspense, useEffect, useRef } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
+import type { UIMessage } from 'ai'
 import {
   AssistantRuntimeProvider,
   useAssistantRuntime,
@@ -11,6 +12,31 @@ import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-s
 import { Thread } from '@/components/assistant-ui/thread'
 import { SiteFooter } from '@/components/site-footer'
 import { APP_NAME } from '@/lib/appConfig'
+import { PlusIcon } from 'lucide-react'
+
+const CHAT_STORAGE_KEY = 'nvidia-chat-history'
+
+function loadStoredMessages(): UIMessage[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(CHAT_STORAGE_KEY)
+    return raw ? (JSON.parse(raw) as UIMessage[]) : []
+  } catch {
+    return []
+  }
+}
+
+function saveMessages(messages: UIMessage[]) {
+  try {
+    window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages))
+  } catch {}
+}
+
+function clearSavedMessages() {
+  try {
+    window.localStorage.removeItem(CHAT_STORAGE_KEY)
+  } catch {}
+}
 
 function ReplayFromQueryParam() {
   const runtime = useAssistantRuntime()
@@ -35,9 +61,16 @@ function ReplayFromQueryParam() {
   return null
 }
 
-function HomeShell() {
+interface HomeShellProps {
+  initialMessages: UIMessage[]
+  onNewChat: () => void
+}
+
+function HomeShell({ initialMessages, onNewChat }: HomeShellProps) {
   const runtime = useChatRuntime({
     transport: new AssistantChatTransport({ api: '/api/chat' }),
+    messages: initialMessages,
+    onFinish: ({ messages }) => saveMessages(messages),
     suggestions: [
       { prompt: 'What is CUDA?' },
       { prompt: 'When was the latest NVIDIA GPU released?' },
@@ -61,6 +94,14 @@ function HomeShell() {
             </p>
           </div>
           <nav className="flex items-center gap-4 text-xs">
+            <button
+              onClick={onNewChat}
+              className="flex items-center gap-1 text-muted-foreground hover:text-[#9bd02a] transition-colors"
+              title="Start a new conversation"
+            >
+              <PlusIcon className="size-3.5" />
+              New chat
+            </button>
             <Link
               href="/eval"
               className="text-muted-foreground hover:text-[#9bd02a]"
@@ -85,9 +126,27 @@ function HomeShell() {
 }
 
 export default function Home() {
+  const [{ key, initialMessages }, setState] = useState({
+    key: 0,
+    initialMessages: [] as UIMessage[],
+  })
+
+  // Load persisted messages after first client render (avoids SSR/hydration mismatch).
+  useEffect(() => {
+    const stored = loadStoredMessages()
+    if (stored.length > 0) {
+      setState({ key: 1, initialMessages: stored })
+    }
+  }, [])
+
+  const handleNewChat = () => {
+    clearSavedMessages()
+    setState(s => ({ key: s.key + 1, initialMessages: [] }))
+  }
+
   return (
     <Suspense fallback={null}>
-      <HomeShell />
+      <HomeShell key={key} initialMessages={initialMessages} onNewChat={handleNewChat} />
     </Suspense>
   )
 }
