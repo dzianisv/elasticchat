@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { streamText, tool, jsonSchema, stepCountIs, convertToModelMessages } from 'ai'
 import { createAzure } from '@ai-sdk/azure'
+import { waitUntil } from '@vercel/functions'
 import { es } from '@/lib/elasticsearch'
 import { embedTexts } from '@/lib/embeddings'
 import { Langfuse } from 'langfuse'
@@ -14,6 +15,8 @@ try {
       publicKey: process.env.LANGFUSE_PUBLIC_KEY || '',
       secretKey: process.env.LANGFUSE_SECRET_KEY || '',
       baseUrl: process.env.LANGFUSE_BASEURL || 'https://cloud.langfuse.com',
+      flushAt: 1,       // don't batch — flush every event immediately
+      flushInterval: 0, // disable interval-based flushing
     })
   }
 } catch {
@@ -207,20 +210,23 @@ export async function POST(req: Request) {
         },
       }),
     },
-    onFinish: async ({ usage }) => {
-      try {
-        trace?.generation({
-          name: 'chat-completion',
-          usage: {
-            input: usage?.promptTokens,
-            output: usage?.completionTokens,
-            total: usage?.totalTokens,
-          },
-        })
-        await langfuse?.flushAsync()
-      } catch {
-        // Ignore langfuse errors
-      }
+    onFinish: ({ usage }) => {
+      if (!langfuse) return
+      waitUntil((async () => {
+        try {
+          trace?.generation({
+            name: 'chat-completion',
+            usage: {
+              input: usage?.promptTokens,
+              output: usage?.completionTokens,
+              total: usage?.totalTokens,
+            },
+          })
+          await langfuse.flushAsync()
+        } catch {
+          // Ignore langfuse errors
+        }
+      })())
     },
   })
 
