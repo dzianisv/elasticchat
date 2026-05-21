@@ -1,6 +1,6 @@
 # ElasticChat
 
-> **NVIDIA Assistant** — a RAG chatbot that answers questions about NVIDIA by citing posts from the NVIDIA blog corpus (blogs.nvidia.com, developer.nvidia.com, nvidianews.nvidia.com, and more).
+> **NVIDIA Assistant** — an agentic RAG chatbot that answers questions about NVIDIA by citing posts from the NVIDIA blog corpus (blogs.nvidia.com, developer.nvidia.com, nvidianews.nvidia.com, and more).
 
 **Live:** [elasticchat.vercel.app](https://elasticchat.vercel.app/) · **G-Eval:** [elasticchat.vercel.app/eval](https://elasticchat.vercel.app/eval) · **Ingestion:** [elasticchat.vercel.app/ingest](https://elasticchat.vercel.app/ingest)
 
